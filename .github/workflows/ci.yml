@@ -195,9 +195,14 @@ jobs:
         run: python scripts/test_coverage.py run pocketstation
         timeout-minutes: 15
 
-      - name: Clippy PocketStation capture (Windows and Linux)
-        if: runner.os == 'Windows' || runner.os == 'Linux'
-        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture ${{ runner.os == 'Linux' && '--all-targets' || '' }} -- -D warnings
+      - name: Clippy PocketStation capture (Linux)
+        if: runner.os == 'Linux'
+        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture --all-targets -- -D warnings
+
+      - name: Clippy PocketStation capture (Windows)
+        if: runner.os == 'Windows'
+        # Keep the temporary test-target carve-out visible until #1009 is resolved.
+        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
 
       - name: Build core with parakeet (cross-platform)
         # Guards against Linux-parakeet breakage that today only surfaces
