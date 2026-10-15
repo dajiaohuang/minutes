@@ -687,7 +687,7 @@ describe("getPersonProfile", () => {
   it("builds profile from meeting attendees", async () => {
     writeMeeting("meeting.md", VALID_MEETING);
 
-    const profile = await getPersonProfile(tempDir, "Alex");
+    const profile = await getPersonProfile(tempDir, "Alex K.");
     expect(profile.meetings).toHaveLength(1);
     expect(profile.meetings[0].title).toBe("Q2 Pricing Discussion");
     expect(profile.topics).toContain("pricing");
@@ -1587,11 +1587,11 @@ describe("sensitivity enforcement", () => {
     writeMeeting("valid.md", VALID_MEETING);
     writeMeeting("restricted.md", RESTRICTED_MEETING);
     // "Alex K." attends both; the restricted one must not appear by default.
-    const def = await getPersonProfile(tempDir, "Alex");
+    const def = await getPersonProfile(tempDir, "Alex K.");
     expect(def.meetings.map((m) => m.title)).not.toContain(
       "Board Pricing Strategy"
     );
-    const overridden = await getPersonProfile(tempDir, "Alex", {
+    const overridden = await getPersonProfile(tempDir, "Alex K.", {
       includeRestricted: true,
     });
     expect(overridden.meetings.map((m) => m.title)).toContain(

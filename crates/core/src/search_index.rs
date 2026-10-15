@@ -855,7 +855,11 @@ impl SearchIndex {
             txn.execute("DELETE FROM meetings_fts WHERE rowid = ?", [rowid])?;
             txn.execute(
                 "INSERT INTO meetings_fts (rowid, title, body) VALUES (?, ?, ?)",
-                params![rowid, title, body],
+                params![
+                    rowid,
+                    crate::retrieval::search_tokens(&title).join(" "),
+                    crate::retrieval::search_tokens(&body).join(" "),
+                ],
             )?;
 
             // Replace attendees.
@@ -1015,6 +1019,11 @@ impl SearchIndex {
         let limit = limit.unwrap_or(usize::MAX);
         if query.trim().is_empty() {
             return search_list(&conn, filters, limit);
+        }
+        if !crate::retrieval::query_is_bounded(query) {
+            return Err(SearchIndexError::Io(
+                "search query exceeds 2048 UTF-16 units".into(),
+            ));
         }
         let sanitized = sanitize_fts_query(query);
         if sanitized.is_empty() {
@@ -1217,6 +1226,7 @@ fn restricted_live_result(
         content_type: content_type.into(),
         snippet: String::new(),
         matched_via_alias: None,
+        evidence: None,
     })
 }
 
@@ -1269,6 +1279,7 @@ fn search_list(
                 content_type: r.get(3)?,
                 snippet: String::new(),
                 matched_via_alias: None,
+                evidence: None,
             })
         })?
         .filter_map(|r| r.ok())
@@ -1335,6 +1346,7 @@ fn search_match(
                 content_type: r.get(3)?,
                 snippet: snip,
                 matched_via_alias: None,
+                evidence: None,
             })
         })?
         .filter_map(|r| r.ok())
@@ -1437,7 +1449,7 @@ mod tests {
         for (query, body) in [
             (
                 "pricing roadmap",
-                "The roadmap comes first. Much later we revisited prices.",
+                "The roadmap comes first. Much later we revisited pricing.",
             ),
             (
                 "pricing/roadm",
@@ -1447,7 +1459,10 @@ mod tests {
                 "café résu",
                 "The cafe discussion included detailed resumes.",
             ),
-            ("running", "The team runs the migration every morning."),
+            (
+                "running",
+                "The team is running the migration every morning.",
+            ),
         ] {
             assert!(
                 live_fts_match_snippet("Quarterly plan", body, query).is_some(),

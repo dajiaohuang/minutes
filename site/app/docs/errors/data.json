@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-09-16",
-  "visibleCount": 70,
+  "generatedAt": "2026-10-15",
+  "visibleCount": 71,
   "hiddenCount": 17,
   "groups": [
     {
       "enumName": "CaptureError",
-      "count": 8,
+      "count": 9,
       "entries": [
         {
           "id": "captureerror-devicenotfound-target-os-macos",
@@ -94,6 +94,17 @@
           "hidden": false,
           "anchorId": "error-captureerror-emptyrecording",
           "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-emptyrecording"
+        },
+        {
+          "id": "captureerror-storageretiring",
+          "enumName": "CaptureError",
+          "variant": "StorageRetiring",
+          "cfg": null,
+          "message": "recording storage is still finishing after the stop deadline; partial audio remains at its original path",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-storageretiring",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-storageretiring"
         }
       ]
     },

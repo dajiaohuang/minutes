@@ -314,6 +314,8 @@ mod tests {
             filter_diagnosis: None,
         };
         fm.decisions = vec![Decision {
+            id: None,
+            effective_date: None,
             text: "Switch to monthly billing".into(),
             topic: Some("pricing".into()),
             authority: None,

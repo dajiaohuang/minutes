@@ -39,8 +39,20 @@ pub enum CaptureError {
     #[error("recording produced empty audio (0 bytes)")]
     EmptyRecording,
 
+    /// The audio worker still owns its exact WAV handle after the stop deadline.
+    /// Callers must leave that file in place: copying or deleting it can lose
+    /// the final header and buffered tail when the worker eventually retires.
+    #[error("recording storage is still finishing after the stop deadline; partial audio remains at its original path")]
+    StorageRetiring,
+
     #[error("audio I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl CaptureError {
+    pub fn storage_is_retiring(&self) -> bool {
+        matches!(self, Self::StorageRetiring)
+    }
 }
 
 #[derive(Debug, Error)]

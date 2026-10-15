@@ -327,6 +327,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Recover a native WAV/RF64/BW64 stem into lossless, processable WAV parts
+    RecoverStem {
+        /// Original stem file (preserved unchanged)
+        path: PathBuf,
+        /// New output directory; existing directories are refused
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Duration of each part, at most four hours
+        #[arg(long, default_value_t = 3600)]
+        chunk_secs: u64,
+    },
     /// Start recording audio (foreground process, Ctrl-C or `minutes stop` to finish)
     Record {
         /// Optional title for this recording
@@ -2001,6 +2012,16 @@ fn main() -> Result<()> {
     minutes_core::logging::rotate_logs().ok();
 
     let result = match cli.command {
+        Commands::RecoverStem {
+            path,
+            output_dir,
+            chunk_secs,
+        } => {
+            let receipt = minutes_core::stem_recovery::recover_stem(&path, &output_dir, chunk_secs)
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
         Commands::Record {
             title,
             context,
@@ -4172,17 +4193,11 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
 }
 
 #[derive(Serialize)]
-struct CleanupError {
-    path: PathBuf,
-    error: String,
-}
-
-#[derive(Serialize)]
 struct CleanupReport {
     plan: minutes_core::retention::RetentionPlan,
     applied: bool,
     removed: Vec<PathBuf>,
-    errors: Vec<CleanupError>,
+    errors: Vec<minutes_core::retention::RetentionRemovalError>,
 }
 
 fn cmd_storage(json: bool, config: &Config) -> Result<()> {
@@ -4217,19 +4232,9 @@ fn cmd_cleanup(apply: bool, older_than: Option<&str>, json: bool, config: &Confi
     };
 
     if apply {
-        for item in
-            report.plan.items.iter().filter(|item| {
-                item.action == minutes_core::retention::RetentionAction::DeleteCandidate
-            })
-        {
-            match std::fs::remove_file(&item.path) {
-                Ok(()) => report.removed.push(item.path.clone()),
-                Err(error) => report.errors.push(CleanupError {
-                    path: item.path.clone(),
-                    error: error.to_string(),
-                }),
-            }
-        }
+        let removal = minutes_core::retention::apply_audio_retention(&report.plan);
+        report.removed = removal.removed;
+        report.errors = removal.errors;
     }
 
     if json {
@@ -7655,9 +7660,10 @@ fn cmd_devices() -> Result<()> {
         for d in &devices {
             eprintln!("  {}", d);
         }
-        let json = serde_json::to_string_pretty(&devices)?;
-        println!("{}", json);
     }
+    // Headless callers still need valid JSON, not an empty stdout stream.
+    let json = serde_json::to_string_pretty(&devices)?;
+    println!("{}", json);
 
     // Platform-specific virtual audio hints
     #[cfg(target_os = "macos")]
@@ -7818,10 +7824,26 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
         eprintln!();
-        eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
-        eprintln!(
-            "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
-        );
+        // #1000: this listing used to recommend sherpa unconditionally, including
+        // on builds that cannot run it, which is how a bilingual user on the
+        // Homebrew build was sent to `--sherpa`.
+        if cfg!(feature = "engine-sherpa") {
+            eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
+            );
+        } else {
+            eprintln!("Sherpa engine (not available in this build):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (needs a build with `--features engine-sherpa`;"
+            );
+            eprintln!(
+                "                                       `brew install` does not include it. For multilingual"
+            );
+            eprintln!(
+                "                                       audio on this build, use `--model large-v3`.)"
+            );
+        }
         eprintln!();
         eprintln!("Parakeet.cpp (currently unavailable in Minutes):");
         eprintln!("  --parakeet is retained for CLI compatibility but installs nothing until");
@@ -8381,8 +8403,41 @@ fn ensure_legacy_sherpa_target(dir: &Path) -> Result<()> {
 /// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
 /// `engine-sherpa` transcription engine into the resolved model directory.
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
+    // Protecting a managed install comes first. It reads the target directory
+    // and writes nothing, so it is free to run even on a build that cannot use
+    // sherpa, and pointing `--sherpa` at an orukeet install must keep saying so
+    // rather than being swallowed by the capability refusal below.
     let dir = minutes_core::sherpa_engine::model_dir(config);
     ensure_legacy_sherpa_target(&dir)?;
+
+    // Issue #1000. `--sherpa` used to download the model and write
+    // `engine = "sherpa"` first, then print a note that this build cannot run
+    // sherpa. On the Homebrew install path that is the default outcome: the
+    // formula builds without `--features engine-sherpa`, `setup --list`
+    // recommends sherpa for multilingual work, and following that advice left a
+    // reporter with 639 MB of unusable model and a config value the binary
+    // silently ignores from then on.
+    //
+    // Refuse before spending either. Writing a config value the running binary
+    // knows it cannot honor is what turns a missing feature into a silent wrong
+    // result, and the only downstream trace was a `processing_warnings` entry
+    // in each meeting's frontmatter.
+    //
+    // This gates the explicit `--sherpa` request only. Plain `setup` reaches
+    // here through `setup_plan`, which already checks the same capability and
+    // sets `install_sherpa` accordingly.
+    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+        anyhow::bail!(
+            "This build of Minutes was compiled without the sherpa engine, so it cannot run \
+             Parakeet v3. Nothing was downloaded and your config was not changed.\n\n\
+             The Homebrew formula builds without it today, so `brew install` produces such a \
+             build. To use sherpa, install the signed desktop app or \
+             `minutes-macos-arm64-sherpa.tar.gz` from a release, or build from source with \
+             `cargo install --path crates/cli --features engine-sherpa`.\n\n\
+             Whisper handles multilingual audio in the meantime: `minutes setup --model large-v3`."
+        );
+    }
+
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
     eprintln!("  Dir: {}", dir.display());
     std::fs::create_dir_all(&dir)
@@ -8425,10 +8480,15 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
             ),
         }
     }
-    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+    // Reaching here with `--sherpa` means the feature is compiled in, so the
+    // only remaining gap is the plugin dylib, which is installable without a
+    // rebuild. That case stays a note rather than a refusal.
+    #[cfg(feature = "engine-sherpa")]
+    if select_sherpa && !minutes_core::sherpa_plugin::plugin_available() {
         eprintln!(
-            "Note: this build lacks the sherpa engine, so transcription falls back to whisper \
-             until you build with `--features engine-sherpa`."
+            "Note: the sherpa plugin library is not installed, so transcription falls back to \
+             whisper until it is. Install `minutes-macos-arm64-sherpa.tar.gz` or the signed \
+             desktop app, or build `crates/sherpa-plugin`."
         );
     }
     Ok(())
@@ -9484,6 +9544,68 @@ mod input_meter_tests {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+
+    /// Issue #1000: `--sherpa` must not spend 639 MB and rewrite the engine on a
+    /// build that cannot run sherpa. This asserts the guard exists and refuses
+    /// before either side effect, rather than warning after both.
+    ///
+    /// The needle is assembled at runtime so this test cannot match itself.
+    #[test]
+    fn setup_sherpa_refuses_before_downloading_on_a_build_without_the_feature() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let guard = format!(
+            "{}{}",
+            "if select_sherpa && !cfg!(feature = ", "\"engine-sherpa\") {"
+        );
+        let position = source
+            .find(&guard)
+            .expect("the --sherpa build-capability guard is gone");
+
+        let download = source
+            .find("Installing sherpa-onnx parakeet-tdt-0.6b-v3")
+            .expect("the download banner moved; update this guard");
+        let write = source
+            .find(&format!(
+                "{}{}",
+                "cfg.transcription.engine = ", "\"sherpa\".to_string();"
+            ))
+            .expect("the engine write moved; update this guard");
+
+        assert!(
+            position < download,
+            "the guard must refuse before anything is downloaded"
+        );
+        assert!(
+            position < write,
+            "the guard must refuse before the engine is written to config"
+        );
+    }
+
+    /// The same listing that recommended sherpa is what sent the reporter to
+    /// `--sherpa` in the first place, so it has to be capability-aware too.
+    #[test]
+    fn setup_list_does_not_recommend_sherpa_on_a_build_without_it() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            source.contains("Sherpa engine (not available in this build):"),
+            "the listing no longer has a branch for builds that cannot run sherpa"
+        );
+        assert!(
+            source.contains(&format!(
+                "{}{}",
+                "if cfg!(feature = ", "\"engine-sherpa\") { eprintln!(\"Sherpa engine (recommended"
+            )) || source.contains("Sherpa engine (recommended for multilingual / SOTA, --sherpa):"),
+            "the recommended-sherpa line is missing entirely"
+        );
+    }
     /// Parse CLI args on a thread with a generous stack. `Commands` has
     /// ~70 variants and clap's derive parser builds large temporaries in
     /// debug builds; on Windows the default test-thread stack overflowed
@@ -18235,6 +18357,9 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
     );
     eprintln!();
 
+    // Keep the exact temporary file capability through enrollment. Error
+    // paths preserve it: a timed-out capture writer may still be retiring.
+    let mut captured_clip = None;
     let audio_path = if let Some(path) = file {
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", path.display()));
@@ -18264,16 +18389,33 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         );
         eprintln!();
 
-        let tmp_dir = std::env::temp_dir().join("minutes-enroll");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let tmp_path = tmp_dir.join("enroll-sample.wav");
+        let tmp_dir = std::env::temp_dir()
+            .canonicalize()?
+            .join(format!("minutes-enroll-{}", std::process::id()));
+        let directory =
+            minutes_core::policy_fs::BoundRecoveryDirectory::prepare_owner_private(&tmp_dir)?;
+        let reservation = directory.create_random_private_control_file("enroll", &[])?;
+        let mut wav_name = reservation
+            .display_path()
+            .file_name()
+            .context("enrollment reservation has no filename")?
+            .to_os_string();
+        wav_name.push(".wav");
+        let reservation = directory.rename_bound_no_replace(reservation, &wav_name)?;
+        let tmp_path = reservation.display_path().to_path_buf();
+        captured_clip = Some((directory, reservation));
         let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag_clone = stop_flag.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(duration * 1000));
             flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
         });
-        minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config)?;
+        minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config).with_context(|| {
+            format!(
+                "Enrollment capture failed; its private sample is retained at {}",
+                tmp_path.display()
+            )
+        })?;
         eprintln!("  \x1b[1;32m✓\x1b[0m Recording captured.");
         tmp_path
     };
@@ -18359,8 +18501,10 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes voices\x1b[0m to see your profile");
     }
 
-    if file.is_none() {
-        std::fs::remove_file(&audio_path).ok();
+    if let Some((directory, sample)) = captured_clip {
+        if let Err(error) = directory.remove_owned_private_file(sample) {
+            tracing::warn!(%error, path = %audio_path.display(), "enrollment succeeded but private sample cleanup failed");
+        }
     }
     Ok(())
 }
@@ -18614,7 +18758,7 @@ fn cmd_live(config: &Config) -> Result<()> {
         minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
         "standalone",
     );
-    let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
+    let capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
         minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
         Some(partial_subscriber),
     ) {
@@ -18637,11 +18781,16 @@ fn cmd_live(config: &Config) -> Result<()> {
         }
     };
 
-    match minutes_core::live_transcript::run_with_partials(
+    // Hand capture ownership back as soon as listening stops, not after the
+    // meeting pipeline: a desktop recording started right after Live stops
+    // (Go Live switching to both-sides call capture) would otherwise be
+    // refused as "already owns capture" for the whole processing time (#1110).
+    match minutes_core::live_transcript::run_with_partials_releasing_capture(
         stop,
         config,
         live_context_session_id,
         Some(partial_publisher),
+        Box::new(move || drop(capture_relay)),
     ) {
         Ok((lines, duration, path)) => {
             eprintln!("\nLive transcript complete:");

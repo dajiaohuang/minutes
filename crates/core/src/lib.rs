@@ -133,6 +133,8 @@ pub mod diarize;
 pub mod dictation_cleanup;
 pub mod dictation_commands;
 pub mod dictation_context;
+mod dictation_disfluency;
+pub mod dictation_experience;
 pub mod dictation_memory;
 pub(crate) mod engine_process;
 /// Person entity-resolution clustering (issue #385, class 3): suggestion-only
@@ -144,6 +146,7 @@ pub(crate) mod entity_cluster;
 mod entity_resolution_eval;
 pub mod error;
 pub mod events;
+pub mod evidence;
 pub mod ffmpeg;
 pub mod graph;
 pub mod graph_worker;
@@ -185,6 +188,7 @@ pub mod policy_fs;
 pub mod process_trace;
 pub mod resummarize;
 pub mod retention;
+pub mod retrieval;
 // Shared mono-downmix + decimation resampler (used by capture and streaming)
 pub(crate) mod resample;
 pub mod screen;
@@ -201,6 +205,7 @@ pub mod sherpa_engine;
 #[cfg(feature = "engine-sherpa")]
 pub mod sherpa_plugin;
 pub(crate) mod stem_probe;
+pub mod stem_recovery;
 /// Incremental reader for stems that are still being written (#576).
 pub mod stem_tail;
 #[cfg(feature = "streaming-diarize")]

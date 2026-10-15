@@ -107,18 +107,22 @@ action_items:
 
 ```yaml
 decisions:
-  - text: Revert to annual-only billing across all segments
+  - id: annual-billing-2026
+    text: Revert to annual-only billing across all segments
     topic: pricing
+    effective_date: "2026-04-01"
     authority: high
     supersedes: "2026-02-28 monthly billing decision"
 ```
 
 | Field | Type | Required | Version | Notes |
 |---|---|---|---|---|
+| `id` | string | | v2 (Minutes 0.29.0) | Optional stable decision identity. Preserved by native frontmatter rewrites and resummarization. |
+| `effective_date` | string | | v2 (Minutes 0.29.0) | Optional date used to order decision history. Preserved as supplied; consumers validate it before chronology comparisons. |
 | `text` | string | ✓ | v1 | The decision statement. |
 | `topic` | string | | v1 | Topic bucket for consistency checks. Two decisions with the same normalized `topic` and different `text` flag as potential conflicts in `/minutes-lint`. |
 | `authority` | enum | | **v2** | `high` / `medium` / `low`. Optional hint for weighting. A CEO commitment at a board meeting is high; a drive-by aside is low. Consumers can use this to rank conflicting decisions. |
-| `supersedes` | string | | **v2** | Free-text reference to the earlier decision this one replaces. When set, the consistency report treats the topic conflict as a documented supersession rather than an unresolved contradiction. Example: `"2026-02-28 monthly billing decision"`. |
+| `supersedes` | string | | **v2** | Reference to the earlier decision this one replaces. A unique, chronologically valid reference can resolve the topic conflict. Missing, ambiguous or competing ancestry remains unresolved. Example: `"2026-02-28 monthly billing decision"`. |
 
 ### Intent
 
@@ -524,6 +528,4 @@ Questions, feature requests, or interop issues belong in
 
 ---
 
-_Last updated: 2026-09-15. Corresponds to Minutes v0.26.3, which added the
-`note` corpus type. The frontmatter v2 `authority` and `supersedes` fields on
-`Decision` are unchanged._
+_Last updated: 2026-10-13. Corresponds to Minutes v0.29.0, which preserves optional `id` and `effective_date` fields on `Decision`. These additive fields do not change the frontmatter schema version._

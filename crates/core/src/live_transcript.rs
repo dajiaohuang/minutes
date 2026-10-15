@@ -934,6 +934,30 @@ pub fn run_with_partials(
         existing_context_session_id,
         partial_publisher,
         false,
+        None,
+    )
+}
+
+/// Like [`run_with_partials`], but runs `release_capture` as soon as capture
+/// has stopped and the session files are safe, before the potentially long
+/// meeting pipeline. A caller that owns capture for the session (the CLI's
+/// capture relay) hands ownership back there, so a recording started right
+/// after Live stops is not refused for the whole processing time (#1110).
+#[cfg(feature = "whisper")]
+pub fn run_with_partials_releasing_capture(
+    stop_flag: Arc<AtomicBool>,
+    config: &Config,
+    existing_context_session_id: Option<String>,
+    partial_publisher: Option<LivePartialPublisher>,
+    release_capture: Box<dyn FnOnce() + Send>,
+) -> Result<(usize, f64, PathBuf), MinutesError> {
+    run_with_partials_internal(
+        stop_flag,
+        config,
+        existing_context_session_id,
+        partial_publisher,
+        false,
+        Some(release_capture),
     )
 }
 
@@ -953,6 +977,7 @@ pub fn run_with_partials_for_background(
         existing_context_session_id,
         partial_publisher,
         true,
+        None,
     )
 }
 
@@ -963,6 +988,7 @@ fn run_with_partials_internal(
     existing_context_session_id: Option<String>,
     partial_publisher: Option<LivePartialPublisher>,
     defer_processing: bool,
+    mut release_capture: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
     let mark_precreated_session_failed = |error: &MinutesError| {
         if let Some(session_id) = existing_context_session_id.as_deref() {
@@ -1048,14 +1074,24 @@ fn run_with_partials_internal(
                     config,
                     &pid::live_transcript_wav_path(),
                     &path,
-                    || drop(pid_guard),
+                    || {
+                        drop(pid_guard);
+                        if let Some(release) = release_capture.take() {
+                            release();
+                        }
+                    },
                 )
             } else {
                 crate::live_session::finalize_stopped_live_session_with_release(
                     config,
                     &pid::live_transcript_wav_path(),
                     &path,
-                    || drop(pid_guard),
+                    || {
+                        drop(pid_guard);
+                        if let Some(release) = release_capture.take() {
+                            release();
+                        }
+                    },
                 )
             };
             let finalization = match finalization_result {
@@ -1098,6 +1134,9 @@ fn run_with_partials_internal(
         }
         Err(error) => {
             drop(pid_guard);
+            if let Some(release) = release_capture.take() {
+                release();
+            }
             if let Some(session_id) = context_session_id.as_deref() {
                 crate::context_store::mark_live_transcript_failed(
                     session_id,
@@ -1132,6 +1171,23 @@ fn run_inner(
 
     let mut stream = AudioStream::start(device_override)?;
     tracing::info!(device = %stream.device_name, "live transcript audio stream started");
+    // The desktop app installs no tracing subscriber, so record the input in
+    // the shared log too. Standalone Live captures this one device only; when
+    // a call's audio is missing (#1110), this is what shows which input it was.
+    crate::logging::append_log(&serde_json::json!({
+        "ts": Local::now().to_rfc3339(),
+        "level": "info",
+        "step": "live_transcript_input",
+        "file": "",
+        "message": "standalone live transcript captures a single input device",
+        "extra": {
+            "device": stream.device_name,
+            "device_override": device_override,
+            "device_is_system_audio_route":
+                crate::capture::is_system_audio_device_name(&stream.device_name),
+        }
+    }))
+    .ok();
 
     // Device change monitor for auto-reconnection. Pinned when the user
     // supplied an explicit device override.

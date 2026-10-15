@@ -25,6 +25,12 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
 
+[calendar]
+enabled = true
+# use_event_title_for_meeting_title = true  # Use the matching calendar event's title
+# ignore_title_contains = ["focus time", "lunch"]  # Case-insensitive title exclusions
+# require_attendees_or_url = true          # Skip events with neither attendees nor a meeting URL
+
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP
                           # "auto" = auto-detect an installed agent CLI for pipeline summaries
@@ -128,7 +134,7 @@ keep_after_summary = false # Delete screenshots after summarization (default: cl
 
 [call_detection]
 enabled = true            # macOS-only today
-poll_interval_secs = 1
+poll_interval_secs = 1     # device/app checks; input attribution refreshes every 5s
 cooldown_minutes = 5
 # Default apps stay conservative:
 # apps = ["zoom.us", "Microsoft Teams", "Webex"]

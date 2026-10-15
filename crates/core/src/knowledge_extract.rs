@@ -252,6 +252,8 @@ mod tests {
                 },
             ],
             decisions: vec![Decision {
+                id: None,
+                effective_date: None,
                 text: "Switch to monthly billing for pharmacy consultations".into(),
                 topic: Some("pricing".into()),
                 authority: None,

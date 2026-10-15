@@ -53,6 +53,8 @@ engine-sherpa = ["dep:libloading", "whisper"]
 voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:objc2-core-audio-types", "dep:tiny_http"]
 
 [dependencies]
+regex = "1"
+unicode-normalization = "0.1"
 tiny_http = { version = "0.12", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

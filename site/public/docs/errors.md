@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-09-16
+> Last generated: 2026-10-15
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 70
+- Visible actionable errors: 71
 - Hidden low-signal wrappers: 17
 
 # CaptureError
@@ -112,6 +112,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-captureerror-emptyrecording
+
+<a id="error-captureerror-storageretiring"></a>
+
+## `CaptureError::StorageRetiring`
+
+Exact message:
+
+> recording storage is still finishing after the stop deadline; partial audio remains at its original path
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-captureerror-storageretiring
 
 # TranscribeError
 

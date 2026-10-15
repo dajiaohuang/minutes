@@ -914,6 +914,14 @@ pub fn capture_relay_discovery_path() -> PathBuf {
     capture_relay_discovery_path_in(&crate::config::Config::minutes_dir())
 }
 
+/// PID of the live process that currently owns capture, if any. A stopping
+/// session keeps ownership until it finishes saving, so a caller handing
+/// capture from one session to the next waits for this to clear instead of
+/// racing into `AlreadyOwned` (#1110).
+pub fn current_capture_owner_pid() -> Option<u32> {
+    live_fresh_owner_pid(&capture_relay_discovery_path())
+}
+
 fn capture_relay_discovery_path_in(dir: &Path) -> PathBuf {
     dir.join(DISCOVERY_FILE)
 }

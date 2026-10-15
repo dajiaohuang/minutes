@@ -196,6 +196,34 @@ fn detect_summarization_warnings(
     warnings
 }
 
+/// Coverage survives both Markdown rendering and machine-readable degradation.
+/// Complete means every source chunk was delivered, not that extraction is perfect.
+fn format_summary_with_coverage(
+    summary: &summarize::Summary,
+    coverage: Option<&summarize::SummaryCoverage>,
+) -> String {
+    let mut text = summarize::format_summary(summary);
+    if let Some(coverage) = coverage {
+        text.push_str("\n\n> ");
+        text.push_str(&coverage.message());
+        text.push('\n');
+    }
+    text
+}
+
+fn detect_summary_coverage_warning(
+    coverage: Option<&summarize::SummaryCoverage>,
+) -> Option<ProcessingWarning> {
+    coverage
+        .filter(|coverage| !coverage.complete)
+        .map(|coverage| ProcessingWarning {
+            step: "summarize".into(),
+            reason: "summary_coverage_incomplete".into(),
+            timeout_secs: None,
+            message: Some(coverage.message()),
+        })
+}
+
 /// Records a [`ProcessingWarning`] when the configured batch transcription
 /// engine is not the one that actually produced the transcript.
 ///
@@ -5054,6 +5082,35 @@ where
             "live capability does not match transcript provenance",
         ));
     }
+    // Bind enrichment to the exact artifact that was created. A user edit
+    // before or during a provider call must not be overwritten by stale state.
+    let canonical_root = config.output_dir.canonicalize()?;
+    let original =
+        markdown::read_stable_active_markdown(&artifact.write_result.path, &canonical_root)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact unavailable or changed before enrichment",
+                )
+            })?;
+    let expected = markdown::render_markdown(
+        &artifact.frontmatter,
+        &artifact.transcript,
+        None,
+        context.user_notes.as_deref(),
+        if descriptor_authorized {
+            None
+        } else {
+            Some(audio_path)
+        },
+    )?;
+    if original.content != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artifact changed before enrichment; existing edits were preserved",
+        )
+        .into());
+    }
     let diagnostic_audio_path = if descriptor_authorized {
         Path::new("authorized-audio")
     } else {
@@ -5181,20 +5238,22 @@ where
     let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
+    let mut summary_coverage: Option<summarize::SummaryCoverage> = None;
     let summary = if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
         // Notes are passed separately so the agent path can byte-budget them
         // apart from the transcript and keep the screenshot coverage bound
         // derived from transcript text only.
-        summarize::summarize_with_template(
+        let report = summarize::summarize_with_template_report(
             &transcript,
             context.user_notes.as_deref(),
             &screen_files,
             config,
             context.template.as_ref(),
             Some(&audio_log_target),
-        )
-        .map(|summary| {
+        );
+        summary_coverage = report.coverage;
+        report.summary.map(|summary| {
             let summary_chars = summary_signal_chars(&summary);
 
             let actions_started = std::time::Instant::now();
@@ -5238,7 +5297,7 @@ where
             );
 
             summary_participants = summary.participants.clone();
-            let formatted = summarize::format_summary(&summary);
+            let formatted = format_summary_with_coverage(&summary, summary_coverage.as_ref());
             raw_summary = Some(summary);
             formatted
         })
@@ -5329,15 +5388,10 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people remain candidates for entity links, but cannot
+        // authorize a transcript rewrite. Use the same evidence as persistence.
+        let participants =
+            confirmed_attendees(&artifact.frontmatter.attendees, &attendees, &speaker_map);
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
@@ -5435,6 +5489,9 @@ where
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = detect_summary_coverage_warning(summary_coverage.as_ref()) {
+        summarization_warnings.push(warning);
+    }
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
@@ -5479,21 +5536,23 @@ where
         merge_recording_health(recording_health, frontmatter.recording_health);
 
     let mut result = if descriptor_authorized {
-        markdown::rewrite_without_retry_path(
+        markdown::rewrite_without_retry_path_guarded(
             &artifact.write_result.path,
             &frontmatter,
             &transcript,
             summary.as_deref(),
             context.user_notes.as_deref(),
+            &original.content,
         )?
     } else {
-        markdown::rewrite_with_retry_path(
+        markdown::rewrite_with_retry_path_guarded(
             &artifact.write_result.path,
             &frontmatter,
             &transcript,
             summary.as_deref(),
             context.user_notes.as_deref(),
             Some(audio_path),
+            &original.content,
         )?
     };
     apply_title_generation(
@@ -5878,6 +5937,7 @@ where
     let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
+    let mut summary_coverage: Option<summarize::SummaryCoverage> = None;
     // Skip summarization when the all-noise gate replaced the transcript body:
     // the LLM has nothing to summarize, and we'd just burn tokens / surface
     // a hallucinated summary on top of a hallucinated transcript.
@@ -5891,15 +5951,16 @@ where
         // passed separately so the agent path can byte-budget them apart from
         // the transcript and keep the screenshot coverage bound derived from
         // transcript text only.
-        summarize::summarize_with_template(
+        let report = summarize::summarize_with_template_report(
             &transcript,
             user_notes.as_deref(),
             &screen_files,
             config,
             template,
             Some(&audio_log_target),
-        )
-        .map(|s| {
+        );
+        summary_coverage = report.coverage;
+        report.summary.map(|s| {
             let summary_chars = summary_signal_chars(&s);
 
             let actions_started = std::time::Instant::now();
@@ -5949,7 +6010,7 @@ where
                     "extracted participants from summary"
                 );
             }
-            let formatted = summarize::format_summary(&s);
+            let formatted = format_summary_with_coverage(&s, summary_coverage.as_ref());
             raw_summary = Some(s);
             formatted
         })
@@ -6031,7 +6092,7 @@ where
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
     // See `confirmed_attendees`: `attendees` stays the merged superset for
-    // entity links and name correction, and only the persisted field narrows.
+    // entity links and candidate matching; persistence and rewrite permission narrow.
     let persisted_attendees = confirmed_attendees(&calendar_attendees, &attendees, &speaker_map);
     let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
         && content_type == ContentType::Meeting
@@ -6041,20 +6102,13 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people cannot authorize a transcript rewrite.
+        let participants = &persisted_attendees;
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
                 &name_pool,
-                &participants,
+                participants,
             );
         transcript = corrected_transcript;
         corrections
@@ -6179,6 +6233,9 @@ where
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = detect_summary_coverage_warning(summary_coverage.as_ref()) {
+        summarization_warnings.push(warning);
+    }
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
@@ -7941,6 +7998,8 @@ pub(crate) fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::D
             // Try to infer topic from the first few words
             let topic = infer_topic(text);
             markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: text.clone(),
                 topic,
                 authority: None,
@@ -8549,6 +8608,83 @@ pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_coverage_persists_and_marks_incomplete_work() {
+        let mut coverage = summarize::SummaryCoverage {
+            complete: true,
+            transcript_bytes: 120_000,
+            notes_bytes: 2_000,
+            source_chunks: 3,
+            completed_chunks: 3,
+            detail: "All source chunks delivered.".into(),
+        };
+        let summary = summarize::Summary {
+            text: String::new(),
+            key_points: vec!["Meeting point".into()],
+            decisions: vec![],
+            action_items: vec![],
+            open_questions: vec![],
+            commitments: vec![],
+            participants: vec![],
+        };
+        let rendered = format_summary_with_coverage(&summary, Some(&coverage));
+        assert!(rendered.contains("Meeting point"));
+        assert!(rendered.contains("Agent input coverage: complete"));
+        assert!(rendered.contains("120000 transcript bytes"));
+        assert!(detect_summary_coverage_warning(Some(&coverage)).is_none());
+        coverage.complete = false;
+        coverage.completed_chunks = 1;
+        coverage.detail = "source chunk 2/3 failed".into();
+        let warning = detect_summary_coverage_warning(Some(&coverage)).unwrap();
+        assert_eq!(warning.reason, "summary_coverage_incomplete");
+        assert!(warning.message.unwrap().contains("source chunk 2/3 failed"));
+    }
+
+    #[test]
+    fn enrichment_preserves_edits_before_and_during_summarization() {
+        for edit_during_summary in [false, true] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let audio_path = dir.path().join("recording.wav");
+            std::fs::write(&audio_path, vec![0u8; 64_044]).unwrap();
+            let mut config = Config {
+                output_dir: dir.path().join("meetings"),
+                ..Config::default()
+            };
+            config.transcription.min_words = 1;
+            config.summarization.engine = "unknown-test-engine".into();
+            config.diarization.engine = "none".into();
+            let context = BackgroundPipelineContext::default();
+            let artifact = write_transcript_artifact(
+                &audio_path,
+                ContentType::Meeting,
+                Some("Revision guard"),
+                &config,
+                &context,
+                None,
+                "[0:00] We agreed to deliver the report on Friday.\n".into(),
+                crate::transcribe::FilterStats::default(),
+                0,
+            )
+            .unwrap();
+            let path = artifact.write_result.path.clone();
+            let edited = format!(
+                "{}\nHuman edit must survive.\n",
+                std::fs::read_to_string(&path).unwrap()
+            );
+            if !edit_during_summary {
+                std::fs::write(&path, &edited).unwrap();
+            }
+            let result =
+                enrich_transcript_artifact(&audio_path, &artifact, &config, &context, |stage| {
+                    if edit_during_summary && matches!(stage, PipelineStage::Summarizing) {
+                        std::fs::write(&path, &edited).unwrap();
+                    }
+                });
+            assert!(result.is_err(), "must refuse to replace a changed artifact");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), edited);
+        }
+    }
 
     #[test]
     fn apple_speech_preference_resolves_through_closed_product_gate() {
@@ -10571,6 +10707,44 @@ mod tests {
     }
 
     #[test]
+    fn mentioned_or_uncertain_people_cannot_authorize_name_rewrites() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speaker_map = vec![
+            attribution("SPEAKER_00", "Geert", diarize::Confidence::Medium),
+            attribution("SPEAKER_01", "Jacques", diarize::Confidence::Low),
+        ];
+        let participants = confirmed_attendees(&[], &candidates, &speaker_map);
+        let raw = "thanks bert for the notes; merci jacque for joining";
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            raw,
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, raw);
+        assert!(corrections.is_empty());
+    }
+
+    #[test]
+    fn trusted_quiet_attendees_and_high_confidence_speakers_keep_name_corrections() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speakers = vec![attribution(
+            "SPEAKER_00",
+            "Jacques",
+            diarize::Confidence::High,
+        )];
+        // Existing calendar/prior-artifact trust is preserved, including someone
+        // who did not produce an attributable speaking segment.
+        let participants = confirmed_attendees(&["Geert".into()], &candidates, &speakers);
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            "thanks bert for the notes; merci jacque for joining",
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, "thanks Geert for the notes; merci Jacques for joining");
+        assert_eq!(corrections.len(), 2);
+    }
+
+    #[test]
     fn confirmed_attendees_drops_names_only_mentioned_in_the_transcript() {
         // Issue #245. The reporter's two person Teams call produced eight
         // attendees: the two who were there, plus six people whose access
@@ -10921,6 +11095,8 @@ mod tests {
             status: "open".into(),
         }];
         let decisions = vec![markdown::Decision {
+            id: None,
+            effective_date: None,
             text: "Launch pricing at monthly billing per month".into(),
             topic: Some("pricing strategy".into()),
             authority: None,
@@ -10973,24 +11149,32 @@ mod tests {
             &[],
             &[
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Speaker_1 provide speaker roster and contact notes".into(),
                     topic: Some("speaker 1 provide speaker".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Reach out to Cardinal about access".into(),
                     topic: Some("reach out".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Pioneer asked build the custom report after review".into(),
                     topic: Some("pioneer asked build".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "LeaderNet 835 reconciliation remains the core workflow".into(),
                     topic: Some("leadernet 835 reconciliation".into()),
                     authority: None,
@@ -11670,6 +11854,8 @@ mod tests {
             &attendees,
             &action_items,
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Speaker_1 provide speaker roster and contact notes".into(),
                 topic: Some("speaker 1 provide speaker".into()),
                 authority: None,
@@ -11749,6 +11935,8 @@ mod tests {
             &["Alex Chen".into()],
             &[],
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
                 authority: None,
@@ -11771,6 +11959,8 @@ mod tests {
             Some("iPhone 16 Pro"),
             &entities,
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
                 authority: None,

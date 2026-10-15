@@ -335,11 +335,13 @@ Dictation clipboard behavior is platform-specific:
 | key | default | meaning |
 |---|---|---|
 | `enabled` | `true` | Detect active calls automatically |
-| `poll_interval_secs` | `1` | How often to check for active calls |
+| `poll_interval_secs` | `1` | How often to check apps and input devices. Process input attribution refreshes at most once per five seconds for an unchanged app process family. |
 | `cooldown_minutes` | `5` | Wait before re-triggering after a hangup |
 | `apps` | `["zoom.us","Microsoft Teams","Webex"]` | App names to recognize |
 | `stop_when_call_ends` | `false` | Show an auto-stop countdown when the call ends |
 | `call_end_stop_countdown_secs` | `30` | Seconds before auto-stop fires |
+
+Call detection keeps one audio-check helper alive between polls and skips audio queries when no configured call app or supported browser is running. The helper checks all input-capable devices before requesting process attribution. For an unchanged app process family, a microphone ownership change can take up to five seconds to appear. App exits and definitely idle input devices are checked on the configured poll interval. Per-app input attribution still prevents an unrelated dictation tool from validating an idle call app. A stuck helper is discarded after a two-second response deadline and retried by a later poll.
 
 ### `[palette]` — command palette
 
@@ -515,6 +517,21 @@ For real desktop validation of the Windows and Linux collectors, use
 |---|---|---|
 | `enabled` | `true` | Read upcoming meetings from the system calendar |
 | `use_event_title_for_meeting_title` | `false` | When a recording overlaps a scheduled calendar event, use that event's title as the meeting title instead of the AI-generated one (skips the LLM title refine for that meeting) |
+| `ignore_title_contains` | `[]` | Exclude events whose titles contain any listed substring, ignoring case. Empty strings are ignored. |
+| `require_attendees_or_url` | `false` | Exclude events that have neither attendees nor a recognized meeting URL. Invited in-person meetings still qualify. |
+
+For example, skip focus blocks and personal reminders:
+
+```toml
+[calendar]
+ignore_title_contains = ["focus time", "lunch"]
+require_attendees_or_url = true
+```
+
+Both filters are opt-in. They apply to upcoming meeting reminders and calendar
+matching for recordings. Title exclusions take precedence even when an event
+has attendees or a meeting URL. Recognized URLs include Zoom, Google Meet,
+Teams and Webex; an arbitrary website link does not count as a meeting URL.
 
 ### `output_dir` — top-level
 

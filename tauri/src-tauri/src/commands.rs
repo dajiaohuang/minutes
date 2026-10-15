@@ -1,3 +1,6 @@
+#[path = "dictation_feedback.rs"]
+mod dictation_feedback;
+
 use crate::call_capture;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
@@ -105,6 +108,8 @@ pub struct AppState {
     /// on the call detection banner. Scopes `stop_when_call_ends` so manual
     /// `cmd_start_recording` sessions are never auto-stopped.
     pub recording_started_by_call_detect: Arc<AtomicBool>,
+    /// App that authorized this automatic native recording, cleared on every exit.
+    pub auto_record_app: Arc<Mutex<Option<String>>>,
     /// Set by the frontend's "Keep recording" button during an auto-stop
     /// countdown. Read by the countdown thread in `call_detect.rs` to bail
     /// out before calling stop.
@@ -3001,6 +3006,21 @@ fn preserve_failed_capture(wav_path: &std::path::Path, config: &Config) -> Optio
     Some(dest)
 }
 
+fn preserve_capture_after_error(
+    wav_path: &std::path::Path,
+    config: &Config,
+    error: &minutes_core::error::CaptureError,
+) -> Option<PathBuf> {
+    if error.storage_is_retiring() {
+        // The timed-out worker still owns this inode. A copy would contain an
+        // unfinished WAV, and removing the source would discard its eventual
+        // final header/tail. Do not issue more I/O against the stalled device.
+        Some(wav_path.to_path_buf())
+    } else {
+        preserve_failed_capture(wav_path, config)
+    }
+}
+
 fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Option<PathBuf> {
     let metadata = path.metadata().ok()?;
     if metadata.len() == 0 {
@@ -3545,6 +3565,7 @@ fn start_native_call_recording(
     mode: CaptureMode,
     config: &Config,
     requested_title: Option<String>,
+    automatic_app: Option<&str>,
 ) -> Result<(), String> {
     minutes_core::pid::create().map_err(|error| error.to_string())?;
     // Re-check sensitive exclusivity with the PID (the atomic anchor) held;
@@ -3636,6 +3657,19 @@ fn start_native_call_recording(
     crate::sync_tray_state(app_handle);
     minutes_core::notes::save_recording_start().ok();
     maybe_save_and_show_recording_consent(app_handle, mode, config);
+    if let Some(process_name) = automatic_app {
+        minutes_core::logging::log_step(
+            "call_detect",
+            "",
+            0,
+            serde_json::json!({
+                "action": "auto_record_started", "process_name": process_name,
+                "source": "native_app_input", "path": output_path,
+            }),
+        );
+        show_user_notification(app_handle, "Automatic call recording started", &format!("Recording {process_name} with microphone and Mac audio. Stop at any time in Minutes."));
+        crate::show_main_window(app_handle);
+    }
     // Native capture writes audio to per-source stems instead of handing samples
     // to the recording path, so the live sidecar had no source and live
     // consumers received nothing during a call (#576). Tail the stems and feed
@@ -3711,8 +3745,64 @@ fn start_native_call_recording(
         }
     });
 
+    // Native capture bypasses record_to_wav, so it must supervise its own
+    // duration/disk policy. Do not infer silence from missing helper telemetry.
+    let mut safety_guard =
+        minutes_core::capture::RecordingSafetyGuard::new(&config.recording, &output_path);
+    let mut safety_stop_warning = None;
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        match session.check_capture_progress() {
+            crate::call_capture::CaptureProgressAction::None => {}
+            crate::call_capture::CaptureProgressAction::Warning(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call audio progress warning".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
+            crate::call_capture::CaptureProgressAction::Stop(message) => {
+                tracing::warn!("{message}");
+                safety_stop_warning = Some(message);
+                stop_flag.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        match safety_guard.check_time_and_disk() {
+            minutes_core::capture::SafetyAction::None => {}
+            minutes_core::capture::SafetyAction::Nudge(message)
+            | minutes_core::capture::SafetyAction::Warning(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Recording safety warning".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
+            minutes_core::capture::SafetyAction::Stop(reason, message) => {
+                tracing::warn!(?reason, "{message}");
+                safety_stop_warning = Some(message);
+                stop_flag.store(true, Ordering::Relaxed);
+                // Use normal helper finalization and processing below. The
+                // guard never abandons or unlinks the captured stems.
+                break;
+            }
+        }
         if let Ok(mut health) = call_capture_health.lock() {
             *health = Some(session.source_health());
         }
@@ -3839,7 +3929,10 @@ fn start_native_call_recording(
             context_session_id.clone(),
             None,
             combine_native_call_warnings(
-                session.capture_warning(),
+                combine_native_call_warnings(
+                    session.capture_warning(),
+                    safety_stop_warning.clone(),
+                ),
                 Some(format!(
                     "Native call capture finalization reported an error: {error}."
                 )),
@@ -3980,7 +4073,7 @@ fn start_native_call_recording(
         recording_finished_at,
         context_session_id.clone(),
         calendar_event,
-        session.capture_warning(),
+        combine_native_call_warnings(session.capture_warning(), safety_stop_warning.clone()),
     ) {
         Ok(job) => {
             processing.store(true, Ordering::Relaxed);
@@ -4577,7 +4670,9 @@ fn reserve_recording_launch(state: &AppState) -> Result<(), String> {
     state
         .starting
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
-        .map(|_| ())
+        .map(|_| {
+            *state.auto_record_app.lock().unwrap() = None;
+        })
         .map_err(|_| "Already recording".into())
 }
 
@@ -5444,7 +5539,7 @@ fn build_artifact_template(
 
     let body = match kind {
         "follow-up-email" => format!(
-            "# Subject\n\nFollow-up: {meeting_title}\n\n# Email Draft\n\nHi team,\n\nThanks again for the conversation today. Here is the clean follow-up from the meeting.\n\n## Key Points\n\n{summary}\n\n## Decisions\n\n{decisions}\n\n## Action Items\n\n{action_items}\n\n## Open Questions\n\n{open_questions}\n\nBest,\n\n[Your name]\n"
+            "# Subject\n\nFollow-up: {meeting_title}\n\n# Email Draft\n\nHi team,\n\nThanks again for the conversation. Here is a recap and the next steps.\n\n## Key Points\n\n{summary}\n\n## Decisions\n\n{decisions}\n\n## Action Items\n\n{action_items}\n\n## Open Questions\n\n{open_questions}\n\nBest,\n\n[Your name]\n"
         ),
         "meeting-brief" => format!(
             "# Objective\n\nState what this next meeting needs to accomplish.\n\n## Context\n\n- Source meeting: [{meeting_title}]({})\n- Attendees: {attendees}\n\n## What Happened Last Time\n\n{summary}\n\n## Decisions Already Made\n\n{decisions}\n\n## Open Questions\n\n{open_questions}\n\n## Suggested Agenda\n\n- Start with the highest-stakes question\n- Confirm any blocked action items\n- End with explicit owners and dates\n\n## Notes\n\n- Add prep notes here.\n",
@@ -6157,6 +6252,7 @@ fn scan_recovery_items_with_ffmpeg_availability(
 pub struct CallDetectSessionHandles {
     pub started_by_call_detect: Arc<AtomicBool>,
     pub countdown_cancel: Arc<AtomicBool>,
+    pub auto_record_app: Arc<Mutex<Option<String>>>,
 }
 
 /// RAII guard that clears the call-detect session flags when dropped.
@@ -6182,6 +6278,7 @@ impl Drop for CallDetectSessionGuard {
         // observe cancellation and own the state transition; otherwise the
         // detector can see `call_ended` followed by a premature `cleared`.
         self.handles.countdown_cancel.store(true, Ordering::Relaxed);
+        *self.handles.auto_record_app.lock().unwrap() = None;
     }
 }
 
@@ -6207,8 +6304,10 @@ pub fn start_recording(
     requested_title: Option<String>,
     language_override: Option<String>,
 ) {
+    crate::dictation_experience::stop_mic_test();
     // Drop on any exit path (early returns, panic, normal exit) clears the
     // session flags so a subsequent manual recording isn't auto-stopped.
+    let automatic_app = call_detect_session.auto_record_app.lock().unwrap().clone();
     let _session_guard = CallDetectSessionGuard::new(call_detect_session);
     let mut config = Config::load();
     if let Some(language) = language_override {
@@ -6258,6 +6357,14 @@ pub fn start_recording(
             call_capture::availability(),
             call_capture::CallCaptureAvailability::Available { .. }
         );
+    // Recheck inside the worker: availability can change after reservation.
+    if automatic_app.is_some() && !native_call_capture_available {
+        let error = "Automatic recording requires native call capture. Open Minutes to check capture access.";
+        set_recording_start_error(&latest_output, error);
+        show_user_notification(&app_handle, "Automatic recording did not start", error);
+        starting.store(false, Ordering::Relaxed);
+        return;
+    }
     if let Some(reason) = &preflight.blocking_reason {
         if !should_bypass_preflight_block_for_native_call_capture(
             &preflight,
@@ -6297,11 +6404,24 @@ pub fn start_recording(
             mode,
             &config,
             requested_title.clone(),
+            automatic_app.as_deref(),
         ) {
             Ok(()) => {
                 return;
             }
             Err(error) => {
+                if automatic_app.is_some() {
+                    let detail = format!("Automatic native call recording failed: {error}");
+                    set_recording_start_error(&latest_output, &detail);
+                    show_user_notification(
+                        &app_handle,
+                        "Automatic recording did not start",
+                        &detail,
+                    );
+                    starting.store(false, Ordering::Relaxed);
+                    recording.store(false, Ordering::Relaxed);
+                    return;
+                }
                 eprintln!("Native call recording unavailable, falling back: {}", error);
                 minutes_core::logging::log_error(
                     "desktop_native_call_start",
@@ -6537,7 +6657,8 @@ pub fn start_recording(
         }
         Err(e) => {
             recording.store(false, Ordering::Relaxed);
-            let preserved = preserve_failed_capture(&wav_path, &config);
+            let storage_retiring = e.storage_is_retiring();
+            let preserved = preserve_capture_after_error(&wav_path, &config, &e);
             if let Some(session_id) = context_session_id.as_deref() {
                 minutes_core::context_store::mark_capture_session_failed(
                     session_id,
@@ -6548,7 +6669,10 @@ pub fn start_recording(
                 .ok();
             }
             if let Some(saved) = preserved {
-                let detail = match mode {
+                let detail = if storage_retiring {
+                    "Audio storage is still finishing. The original recording remains at this path; wait for storage to recover before retrying processing."
+                } else {
+                    match mode {
                     CaptureMode::Meeting => {
                         "Recording failed before processing, but the captured meeting audio was preserved."
                     }
@@ -6561,6 +6685,7 @@ pub fn start_recording(
                     CaptureMode::LiveTranscript => {
                         "Live transcript failed, but the audio was preserved."
                     }
+                }
                 };
                 let notice = OutputNotice {
                     kind: "preserved-capture".into(),
@@ -6694,6 +6819,7 @@ fn spawn_reserved_recording(
     let call_detect_session = CallDetectSessionHandles {
         started_by_call_detect: state.recording_started_by_call_detect.clone(),
         countdown_cancel: state.call_end_countdown_cancel.clone(),
+        auto_record_app: state.auto_record_app.clone(),
     };
     let app_done = app.clone();
     mark_activation_first_recording_started(&activation_progress);
@@ -7019,6 +7145,42 @@ pub fn handle_dictation_shortcut_event(
     }
 }
 
+/// Backend-owned auto-start works even when the main webview is hidden.
+/// Consent Require remains a manual action; no modal confirmation is inferred.
+pub fn start_automatic_call_recording(
+    app: tauri::AppHandle,
+    state: &AppState,
+    process_name: &str,
+) -> Result<(), String> {
+    let config = Config::load_strict().map_err(|e| e.to_string())?;
+    if !config.call_detection.auto_record_enabled_for(process_name) {
+        return Err("Automatic recording is off for this app.".into());
+    }
+    if desktop_recording_consent_required(CaptureMode::Meeting, &config, false).is_some() {
+        return Err("Confirm recording consent in Minutes to start this call.".into());
+    }
+    let plan = cmd_live_capture_plan();
+    if !plan.both_sides {
+        return Err(plan
+            .reason
+            .unwrap_or_else(|| "Native call capture is unavailable.".into()));
+    }
+    prepare_cmd_recording_launch(state, true)?;
+    *state.auto_record_app.lock().unwrap() = Some(process_name.to_string());
+    spawn_reserved_recording(
+        app,
+        state,
+        CaptureMode::Meeting,
+        Some(RecordingIntent::Call),
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_start_recording(
@@ -7338,6 +7500,17 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
         "updateState": update_state,
         "latestOutput": latest_output,
         "callCaptureHealth": call_capture_health,
+        "autoRecordApp": if recording || starting { state.auto_record_app.lock().ok().and_then(|value| value.clone()) } else { None },
+        "configWarning": Config::load_strict().err().map(|error| {
+            let defaults = Config::default();
+            serde_json::json!({
+                "path": Config::config_path(),
+                "error": error,
+                "engine": defaults.transcription.engine,
+                "model": defaults.transcription.model,
+                "outputDir": defaults.output_dir,
+            })
+        }),
         "pid": status.pid,
         "elapsed": elapsed,
         "sensitive": sensitive_session.as_ref().map(|session| serde_json::json!({
@@ -7503,8 +7676,16 @@ pub fn cmd_retry_processing_job(
     Ok(())
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
+pub async fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
+    tauri::async_runtime::spawn_blocking(cmd_weekly_summary_blocking)
+        .await
+        .map_err(|e| format!("cmd_weekly_summary worker failed: {e}"))?
+}
+
+fn cmd_weekly_summary_blocking() -> Result<WeeklySummaryView, String> {
     let config = Config::load();
     let since = (chrono::Local::now() - chrono::Duration::days(7)).to_rfc3339();
     let filters = minutes_core::search::SearchFilters {
@@ -7827,8 +8008,19 @@ fn compute_lifecycle_badges(
 /// `catch` block handles by rendering an error banner. Previously the command
 /// swallowed every error as `[]`, which made real failures look like "no
 /// matches" and was a debugging footgun.
+///
+/// Runs on the blocking pool: a sync Tauri command runs on the main thread
+/// and freezes the window until every corpus read finishes.
 #[tauri::command]
-pub fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
+pub async fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || cmd_search_blocking(query))
+        .await
+        .map_err(|e| format!("cmd_search worker failed: {e}"))?
+}
+
+pub fn cmd_search_blocking(
+    query: String,
+) -> Result<Vec<minutes_core::search::SearchResult>, String> {
     let config = Config::load();
     // Desktop search is the operator's own surface, not an agent surface:
     // restricted meetings stay visible to the human in their own app.
@@ -8808,8 +9000,16 @@ pub fn cmd_retry_recovery(
     Ok(())
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
+pub async fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || cmd_get_meeting_detail_blocking(path))
+        .await
+        .map_err(|e| format!("cmd_get_meeting_detail worker failed: {e}"))?
+}
+
+pub fn cmd_get_meeting_detail_blocking(path: String) -> Result<MeetingDetail, String> {
     let config = Config::load();
     let meeting_path = std::path::PathBuf::from(&path);
     minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
@@ -9858,7 +10058,11 @@ pub fn spawn_terminal(
         let agent_name = agent_override.unwrap_or(&config.assistant.agent);
         let agent_bin = resolve_agent_binary(agent_name).map_err(|err| err.user_message())?;
 
-        let agent_args = filtered_agent_args(agent_name, &config.assistant.agent_args);
+        let agent_args = crate::context::assistant_skills::terminal_args(
+            agent_name,
+            filtered_agent_args(agent_name, &config.assistant.agent_args),
+            &workspace,
+        );
 
         manager.spawn(
             crate::pty::SpawnConfig {
@@ -12961,6 +13165,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "apps": config.call_detection.apps,
             "google_meet_enabled": call_detection_has_sentinel(&config, "google-meet"),
             "teams_web_enabled": call_detection_has_sentinel(&config, "teams-web"),
+            "auto_record": config.call_detection.auto_record,
+            "auto_record_apps": config.call_detection.auto_record_apps,
             "stop_when_call_ends": config.call_detection.stop_when_call_ends,
             "call_end_stop_countdown_secs": config.call_detection.call_end_stop_countdown_secs,
         },
@@ -13344,6 +13550,24 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("call_detection", "teams_web_enabled") => {
             set_call_detection_sentinel(&mut config, "teams-web", value == "true");
         }
+        ("call_detection", "auto_record") => {
+            config.call_detection.auto_record = value
+                .parse::<bool>()
+                .map_err(|_| "auto_record must be true or false")?;
+        }
+        ("call_detection", "auto_record_apps") => {
+            let names: Vec<String> = serde_json::from_str(&value)
+                .map_err(|_| "auto_record_apps must be a JSON array")?;
+            let mut apps = Vec::new();
+            for name in names {
+                let id = minutes_core::config::auto_record_app_id(&name)
+                    .ok_or("Auto-record supports Teams and Zoom desktop only.")?;
+                if !apps.iter().any(|app| app == id) {
+                    apps.push(id.to_string());
+                }
+            }
+            config.call_detection.auto_record_apps = apps;
+        }
         ("call_detection", "stop_when_call_ends") => {
             config.call_detection.stop_when_call_ends = value == "true";
         }
@@ -13397,7 +13621,6 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("dictation", "auto_paste") => {
             config.dictation.auto_paste = value == "true";
         }
-        ("dictation", "cleanup_engine") => config.dictation.cleanup_engine = value.clone(),
         ("dictation", "voice_commands_enabled") => {
             config.dictation.voice_commands_enabled = value == "true";
         }
@@ -13522,8 +13745,16 @@ pub fn cmd_set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
     }
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_get_storage_stats() -> serde_json::Value {
+pub async fn cmd_get_storage_stats() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(cmd_get_storage_stats_blocking)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn cmd_get_storage_stats_blocking() -> serde_json::Value {
     let config = Config::load();
 
     fn walk_size(path: &std::path::Path) -> (u64, usize) {
@@ -13569,6 +13800,35 @@ mod tests {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn live_captures_both_sides_when_native_call_capture_is_usable() {
+        use minutes_core::macos_permissions::MacPermissionStatus;
+        let available = call_capture::CallCaptureAvailability::Available {
+            backend: "screencapturekit-helper".into(),
+        };
+        for status in [
+            MacPermissionStatus::Granted,
+            MacPermissionStatus::NotDetermined,
+            MacPermissionStatus::StaleOrRestartNeeded,
+        ] {
+            assert!(live_capture_plan(&available, status).both_sides);
+        }
+        let denied = live_capture_plan(&available, MacPermissionStatus::Denied);
+        assert!(!denied.both_sides);
+        assert!(denied.reason.unwrap().contains("Screen Recording"));
+    }
+
+    #[test]
+    fn live_falls_back_to_microphone_when_call_capture_is_unavailable() {
+        use minutes_core::macos_permissions::MacPermissionStatus;
+        let unavailable = call_capture::CallCaptureAvailability::Unavailable {
+            detail: "Bundled native call helper is missing from the app bundle.".into(),
+        };
+        let plan = live_capture_plan(&unavailable, MacPermissionStatus::Granted);
+        assert!(!plan.both_sides);
+        assert!(plan.reason.unwrap().contains("helper"));
+    }
 
     #[test]
     fn dictation_latency_target_classes_are_coarse() {
@@ -14060,15 +14320,19 @@ mod tests {
     }
 
     #[test]
-    fn recall_terminal_input_editing_fails_closed_before_meeting_context() {
+    fn recall_terminal_input_holds_only_known_empty_lines_before_meeting_context() {
         let html = include_str!("../../src/index.html");
         assert!(html.contains("let recallTerminalInputReliable = true;"));
         assert!(html.contains("recallTerminalInputReliable = false;"));
+        // An edited line is sent (a leading "/" as an account command, else as
+        // a question with context); only a line known to be empty is held.
+        assert!(html
+            .contains("recallTerminalContextPending && !question && recallTerminalInputReliable"));
         assert!(html.contains(
-            "recallTerminalContextPending && (!question || !recallTerminalInputReliable)"
+            "recallTerminalContextPending && !isAccountCommand && (question || !recallTerminalInputReliable)"
         ));
         // General mode has no meeting path but still owes its first question
-        // the same fail-closed input checks before any context is written.
+        // the same provider-verified preparation before any context is written.
         assert!(
             html.contains("await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath });")
         );
@@ -14134,10 +14398,16 @@ mod tests {
     /// clean run would certify a turn nobody observed finishing.
     #[test]
     fn only_an_observed_successful_exit_completes_a_turn() {
-        use std::process::Command;
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
 
-        let ok = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
-        let failed = Command::new("sh").arg("-c").arg("exit 1").status().unwrap();
+        let ok = std::process::ExitStatus::from_raw(0);
+        #[cfg(unix)]
+        let failed = std::process::ExitStatus::from_raw(1 << 8);
+        #[cfg(windows)]
+        let failed = std::process::ExitStatus::from_raw(1);
 
         assert!(recall_chat_stream_completed(false, Some(ok)));
         assert!(!recall_chat_stream_completed(false, Some(failed)));
@@ -14282,7 +14552,8 @@ mod tests {
         std::env::set_var("HOME", &dir);
         std::env::set_var("USERPROFILE", &dir);
 
-        let result = f(&dir);
+        // Restore process-global test state even when the callback panics.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -14296,7 +14567,10 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
-        result
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     fn test_app_state() -> AppState {
@@ -14349,6 +14623,7 @@ mod tests {
             palette_reopen_pending: Arc::new(AtomicBool::new(false)),
             pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
             recording_started_by_call_detect: Arc::new(AtomicBool::new(false)),
+            auto_record_app: Arc::new(Mutex::new(None)),
             call_end_countdown_cancel: Arc::new(AtomicBool::new(false)),
             call_end_countdown_active: Arc::new(AtomicBool::new(false)),
             call_end_countdown_terminal_state: Arc::new(AtomicU8::new(0)),
@@ -14462,6 +14737,8 @@ mod tests {
         let merged_decisions: Vec<minutes_core::markdown::Decision> = decisions
             .iter()
             .map(|text| minutes_core::markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: (*text).into(),
                 topic: None,
                 authority: None,
@@ -16382,6 +16659,30 @@ mod tests {
         assert!(preserved.starts_with(config.output_dir.join("failed-captures")));
     }
 
+    #[test]
+    fn retiring_capture_keeps_original_inode_for_the_final_header_and_tail() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let wav = dir.path().join("current.wav");
+        let mut writer = std::fs::File::create(&wav).unwrap();
+        let preserved = preserve_capture_after_error(
+            &wav,
+            &config,
+            &minutes_core::error::CaptureError::StorageRetiring,
+        );
+        assert_eq!(preserved, Some(wav.clone()));
+        assert!(
+            !config.output_dir.exists(),
+            "retiring storage must not be copied"
+        );
+        std::io::Write::write_all(&mut writer, b"final header and tail").unwrap();
+        drop(writer);
+        assert_eq!(std::fs::read(wav).unwrap(), b"final header and tail");
+    }
+
     /// Regression for issue #216: when the native call helper's .mov is moved
     /// to failed-captures because it was truncated, the paired per-source PCM
     /// stems must travel with it (with matching new basenames) so that
@@ -17785,6 +18086,23 @@ mod tests {
     }
 
     #[test]
+    fn automatic_recording_metadata_clears_on_early_exit() {
+        let app = Arc::new(Mutex::new(Some("MSTeams".into())));
+        let started = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let _guard = CallDetectSessionGuard::new(CallDetectSessionHandles {
+                started_by_call_detect: started.clone(),
+                countdown_cancel: cancel.clone(),
+                auto_record_app: app.clone(),
+            });
+        }
+        assert!(app.lock().unwrap().is_none());
+        assert!(!started.load(Ordering::Relaxed));
+        assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn rejected_call_detect_start_does_not_mutate_auto_stop_state() {
         with_temp_home(|_| {
             let state = test_app_state();
@@ -18109,7 +18427,9 @@ mod tests {
         let fm = minutes_core::markdown::Frontmatter {
             title: "Pricing Review".into(),
             r#type: ContentType::Meeting,
-            date: chrono::Local::now(),
+            date: chrono::DateTime::parse_from_rfc3339("2026-03-25T10:00:00+00:00")
+                .unwrap()
+                .with_timezone(&chrono::Local),
             duration: "30m".into(),
             source: None,
             status: Some(minutes_core::markdown::OutputStatus::Complete),
@@ -18129,6 +18449,8 @@ mod tests {
                 status: "open".into(),
             }],
             decisions: vec![minutes_core::markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Ship the new pricing page".into(),
                 topic: Some("pricing".into()),
                 authority: None,
@@ -18168,6 +18490,20 @@ mod tests {
         assert!(body.contains("source_meeting: /tmp/pricing-review.md"));
         assert!(body.contains("Ship the new pricing page"));
         assert!(body.contains("Mat: Send follow-up"));
+
+        // A follow-up can be created long after its source meeting. Preserve
+        // the source date and facts without claiming it happened today.
+        let (_, email) = build_artifact_template(
+            &fm,
+            &sections,
+            Path::new("/tmp/pricing-review.md"),
+            "follow-up-email",
+        )
+        .unwrap();
+        assert!(email.contains(&format!("source_date: {}", fm.date.to_rfc3339())));
+        assert!(!email.contains("today"));
+        assert!(email.contains("Ship the new pricing page"));
+        assert!(email.contains("Mat: Send follow-up"));
     }
 
     #[test]
@@ -18195,6 +18531,8 @@ mod tests {
                 status: "open".into(),
             }],
             decisions: vec![minutes_core::markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Ship the new pricing page".into(),
                 topic: Some("pricing".into()),
                 authority: None,
@@ -19569,7 +19907,7 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         let path = home.join("meetings/demo.md");
         let displayed = display_path(&path.display().to_string());
-        assert!(displayed.starts_with("~/"));
+        assert!(displayed.starts_with(&format!("~{}", std::path::MAIN_SEPARATOR)));
     }
 
     #[test]
@@ -19818,7 +20156,8 @@ mod tests {
             .unwrap();
 
             let detail =
-                cmd_get_meeting_detail(meeting_path.to_string_lossy().to_string()).unwrap();
+                cmd_get_meeting_detail_blocking(meeting_path.to_string_lossy().to_string())
+                    .unwrap();
 
             let alex = detail
                 .speaker_map
@@ -20168,8 +20507,12 @@ pub fn cmd_show_dictation_permission_help(app: tauri::AppHandle) -> Result<(), S
 pub fn cmd_recent_dictations(
     limit: Option<usize>,
 ) -> Result<Vec<minutes_core::dictation_memory::DictationMemoryRecord>, String> {
-    minutes_core::dictation_memory::load_recent(limit.unwrap_or(6).clamp(1, 25))
-        .map_err(|error| format!("Could not load recent dictations: {error}"))
+    minutes_core::dictation_memory::load_recent(
+        limit
+            .unwrap_or(6)
+            .clamp(1, minutes_core::dictation_memory::MAX_HISTORY_RECORDS),
+    )
+    .map_err(|error| format!("Could not load recent dictations: {error}"))
 }
 
 #[tauri::command]
@@ -20282,20 +20625,33 @@ pub fn cmd_paste_last_dictation() -> Result<crate::text_insertion::TextInsertion
     cmd_repaste_dictation(latest_dictation_record()?.id)
 }
 
+#[derive(serde::Serialize)]
+pub struct DictationRecoveryResult {
+    #[serde(rename = "candidateId", skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(rename = "rawText", skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
+    pub recovered: bool,
+    pub text: String,
+    pub message: String,
+}
+
 #[tauri::command]
 pub fn cmd_reprocess_dictation(
     id: String,
-) -> Result<crate::text_insertion::TextInsertionResult, String> {
+    preview_only: Option<bool>,
+) -> Result<DictationRecoveryResult, String> {
     let mut record = minutes_core::dictation_memory::find_record(&id)
         .map_err(|error| format!("Could not load dictation history: {error}"))?
         .ok_or_else(|| "Dictation was not found in local history.".to_string())?;
+    let before = record.clone();
     let recovery_path = record
         .recovery_audio_path
         .clone()
         .ok_or_else(|| "This dictation has no saved recovery audio.".to_string())?;
-    let config = Config::load();
-    let expected_target = crate::text_insertion::capture_active_target_context();
-    let text_mode = minutes_core::dictation_context::infer_target_text_mode(
+    let mut config = Config::load();
+    crate::dictation_experience::honor_legacy_cleanup(&mut config);
+    let inferred_mode = minutes_core::dictation_context::infer_target_text_mode(
         record
             .target_context
             .as_ref()
@@ -20303,56 +20659,79 @@ pub fn cmd_reprocess_dictation(
         None,
         None,
     );
+    let target = record.target_context.as_ref();
+    let (text_mode, style) = config.dictation.experience.resolve(
+        target.and_then(|target| target.app_name.as_deref()),
+        None, // History intentionally retains the app name only, never a URL or field.
+        None,
+        inferred_mode,
+    );
+    let style = style.to_string();
+    config.dictation.cleanup_engine = if style == "literal"
+        || text_mode == minutes_core::dictation_context::DictationTextMode::TerminalCode
+    {
+        "none".into()
+    } else {
+        "rules".into()
+    };
     let result = minutes_core::dictation::reprocess_recovery_audio_with_mode(
         &recovery_path,
         &config,
         text_mode,
     )
     .map_err(|error| format!("Could not reprocess saved dictation audio: {error}"))?;
-    let insert_requested = dictation_should_insert(&config);
-    let clipboard_snapshot = if insert_requested && config.dictation.auto_paste_restore {
-        crate::text_insertion::read_clipboard().ok()
-    } else {
-        None
-    };
-    let insertion =
-        crate::text_insertion::insert_text(crate::text_insertion::TextInsertionRequest {
-            text: result.text.clone(),
-            mode: if insert_requested {
-                crate::text_insertion::TextInsertionMode::BestEffortVerified
-            } else {
-                crate::text_insertion::TextInsertionMode::CopyOnly
-            },
-            restore_clipboard: insert_requested && config.dictation.auto_paste_restore,
-            clipboard_snapshot,
-            expected_target: if insert_requested {
-                expected_target
-            } else {
-                None
-            },
-        });
-    let retained =
-        (!dictation_delivery_succeeded(&insertion, insert_requested)).then_some(recovery_path);
+    // Recovery regenerates local history only. Pasting is a separate action.
+    let retained = Some(recovery_path);
     record.raw_text = result.raw_text;
-    record.cleaned_text = result.text;
+    record.cleaned_text = minutes_core::dictation_experience::format_for_cursor(
+        &result.text,
+        None,
+        &style,
+        text_mode,
+        &config.dictation.experience.dictionary,
+    );
     record.pre_command_text = result.pre_command_text;
     record.commands_applied = result.commands_applied;
     record.duration_secs = result.duration_secs;
     record.engine_id = result.engine_id;
     record.engine_descriptor_version = result.engine_descriptor_version;
     record.destination = result.destination;
-    record.insertion = dictation_insertion_memory(&insertion);
-    record.target_context = dictation_target_context(&insertion);
+    record.insertion = minutes_core::dictation_memory::DictationInsertionMemory {
+        outcome: "recovered".into(),
+        method: "retranscribe".into(),
+        verified: false,
+        clipboard_restored: false,
+        message: "Recovered text in Recent Dictations. Copy it or choose where to paste.".into(),
+    };
+    let recovered_text = record.cleaned_text.clone();
+    // Keep the original destination context and private audio until explicitly deleted.
     record.recovery_audio_path = retained;
-    minutes_core::dictation_memory::append_record(record)
+    if preview_only.unwrap_or(false) {
+        let raw_text = record.raw_text.clone();
+        let candidate_id = crate::dictation_experience::stage_recovery(before, record)?;
+        return Ok(DictationRecoveryResult {
+            candidate_id: Some(candidate_id),
+            raw_text: Some(raw_text),
+            recovered: false,
+            text: recovered_text,
+            message: "Preview ready. Review the text before replacing the saved transcript.".into(),
+        });
+    }
+    crate::dictation_experience::preserve_original_transcript(&before, &mut record);
+    minutes_core::dictation_memory::replace_record_if_unchanged(&before, record)
         .map_err(|error| format!("Could not update dictation history: {error}"))?;
-    Ok(insertion)
+    Ok(DictationRecoveryResult {
+        candidate_id: None,
+        raw_text: None,
+        recovered: true,
+        text: recovered_text,
+        message: "Recovered text in Recent Dictations. Copy it or choose where to paste.".into(),
+    })
 }
 
 #[tauri::command]
-pub fn cmd_reprocess_last_dictation() -> Result<crate::text_insertion::TextInsertionResult, String>
-{
-    cmd_reprocess_dictation(latest_dictation_record()?.id)
+pub fn cmd_reprocess_last_dictation() -> Result<DictationRecoveryResult, String> {
+    cmd_reprocess_dictation(latest_dictation_record()?.id, None)
 }
 
 #[tauri::command]
@@ -20360,11 +20739,12 @@ pub fn cmd_delete_dictation_audio(id: String) -> Result<String, String> {
     let mut record = minutes_core::dictation_memory::find_record(&id)
         .map_err(|error| format!("Could not load dictation history: {error}"))?
         .ok_or_else(|| "Dictation was not found in local history.".to_string())?;
+    let before = record.clone();
     let path = record
         .recovery_audio_path
         .take()
         .ok_or_else(|| "This dictation has no saved recovery audio.".to_string())?;
-    minutes_core::dictation_memory::append_record(record)
+    minutes_core::dictation_memory::replace_record_if_unchanged(&before, record)
         .map_err(|error| format!("Could not update dictation history: {error}"))?;
     if path.exists() {
         return Err(
@@ -21533,6 +21913,7 @@ impl Drop for DictationActiveGuard {
 /// hand. Adding it means every acquire learns about it, not just this one.
 #[cfg_attr(not(feature = "voice-live"), allow(dead_code))]
 fn try_acquire_voice(state: &AppState) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     // `starting` as well as `recording`: a recording reserves `starting` first
     // and does not create its PID file or set `recording` until its background
     // thread gets there. Checking only `recording` leaves a window where voice
@@ -21586,6 +21967,7 @@ fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
 }
 
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     if state.voice_active.load(Ordering::Relaxed) {
         return Err("Voice is running — close it before starting a live transcript".into());
     }
@@ -21612,6 +21994,7 @@ pub fn cmd_start_live_transcript(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     try_acquire_live(&state)?;
 
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
@@ -21636,6 +22019,62 @@ pub fn cmd_start_live_transcript(
     }
 
     Ok(())
+}
+
+/// How Go Live should capture. Standalone Live hears one microphone only, so
+/// on a call it misses the other side entirely when the call plays through
+/// headphones (#1110). When native call capture is usable, Go Live records
+/// the microphone and this Mac's audio instead, with the live transcript on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCapturePlan {
+    pub both_sides: bool,
+    pub reason: Option<String>,
+}
+
+fn live_capture_plan(
+    availability: &call_capture::CallCaptureAvailability,
+    screen_recording: minutes_core::macos_permissions::MacPermissionStatus,
+) -> LiveCapturePlan {
+    use minutes_core::macos_permissions::MacPermissionStatus;
+    match availability {
+        call_capture::CallCaptureAvailability::Available { .. } => {
+            if screen_recording == MacPermissionStatus::Denied {
+                LiveCapturePlan {
+                    both_sides: false,
+                    reason: Some(
+                        "Minutes needs Screen Recording permission to capture call audio. Grant it in System Settings > Privacy & Security > Screen Recording.".into(),
+                    ),
+                }
+            } else {
+                LiveCapturePlan {
+                    both_sides: true,
+                    reason: None,
+                }
+            }
+        }
+        call_capture::CallCaptureAvailability::PermissionRequired { detail }
+        | call_capture::CallCaptureAvailability::Unavailable { detail }
+        | call_capture::CallCaptureAvailability::Unsupported { detail } => LiveCapturePlan {
+            both_sides: false,
+            reason: Some(detail.clone()),
+        },
+    }
+}
+
+/// Whether a stopping Live session still owns capture. Go Live and the
+/// automatic switch wait for this before starting the both-sides recording.
+#[tauri::command]
+pub fn cmd_capture_owner_pid() -> Option<u32> {
+    minutes_core::copilot::current_capture_owner_pid()
+}
+
+#[tauri::command]
+pub fn cmd_live_capture_plan() -> LiveCapturePlan {
+    live_capture_plan(
+        &call_capture::availability(),
+        minutes_core::macos_permissions::screen_recording_status(),
+    )
 }
 
 #[tauri::command]
@@ -22792,6 +23231,8 @@ fn start_dictation_session(
     app: &tauri::AppHandle,
     capture_style: Option<HotkeyCaptureStyle>,
 ) -> Result<String, String> {
+    crate::dictation_experience::stop_mic_test();
+    crate::dictation_experience::clear_undo();
     let dictation_pressed_at = Instant::now();
     let state = app.state::<AppState>();
 
@@ -22885,10 +23326,35 @@ fn start_dictation_session(
         // gesture. Buffer utterances so Escape can still discard the whole
         // session even after an ordinary thinking pause finalized one segment.
         config.dictation.accumulate = true;
+        crate::dictation_experience::honor_legacy_cleanup(&mut config);
         // Re-validate the pinned input device for mid-session
         // disconnects (#189). In-memory only; startup-side persistence
         // is in main.rs.
         minutes_core::capture::auto_heal_missing_recording_device(&mut config);
+        let field = if config.dictation.experience.context_enabled {
+            crate::dictation_field::capture(dictation_target_context_for_thread.as_ref())
+        } else {
+            None
+        };
+        let (dictation_text_mode, writing_style) = config.dictation.experience.resolve(
+            dictation_target_context_for_thread
+                .as_ref()
+                .and_then(|target| target.app_name.as_deref()),
+            dictation_target_context_for_thread
+                .as_ref()
+                .and_then(|target| target.bundle_id.as_deref()),
+            field.as_ref().and_then(|field| field.site.as_deref()),
+            dictation_text_mode,
+        );
+        let writing_style = writing_style.to_string();
+        config.dictation.cleanup_engine = if writing_style == "literal"
+            || dictation_text_mode
+                == minutes_core::dictation_context::DictationTextMode::TerminalCode
+        {
+            "none".into()
+        } else {
+            "rules".into()
+        };
         let insert_available_at_start = dictation_insert_fallback_message(&config).is_none();
         let insert_fallback_message_for_events =
             dictation_insert_fallback_message(&config).map(str::to_string);
@@ -22903,6 +23369,7 @@ fn start_dictation_session(
         let latency_trace_for_results = Arc::clone(&latency_trace_for_thread);
         let recovery_audio_for_run = Arc::clone(&recovery_audio_path);
         let recovery_audio_for_results = Arc::clone(&recovery_audio_path);
+        let stop_requested_for_events = Arc::clone(&stop_flag);
 
         let result = minutes_core::dictation::run_with_options(
             stop_flag,
@@ -22953,7 +23420,10 @@ fn start_dictation_session(
                         )
                         .ok();
                 }
-                if !state_str.is_empty() {
+                if let Some(state_str) = dictation_feedback::overlay_state_for_event(
+                    state_str,
+                    stop_requested_for_events.load(Ordering::Relaxed),
+                ) {
                     if matches!(&event, DictationEvent::Listening)
                         && insert_fallback_message_for_events.is_some()
                         && !insert_fallback_emitted.swap(true, Ordering::Relaxed)
@@ -23001,7 +23471,14 @@ fn start_dictation_session(
                         .ok();
                 }
             },
-            move |result| {
+            move |mut result| {
+                result.text = minutes_core::dictation_experience::format_for_cursor(
+                    &result.text,
+                    field.as_ref().map(|field| &field.context),
+                    &writing_style,
+                    dictation_text_mode,
+                    &config_for_results.dictation.experience.dictionary,
+                );
                 final_output_for_results.store(true, Ordering::Relaxed);
                 app_for_results.emit("dictation:result", &result.text).ok();
                 let insert_started_at = Instant::now();
@@ -23020,11 +23497,28 @@ fn start_dictation_session(
                         &app_for_results,
                         &dictation_target_context_for_results,
                     );
-                    let insertion =
-                        crate::text_insertion::insert_text(routine_dictation_insertion_request(
-                            result.text.clone(),
-                            dictation_target_context_for_results.clone(),
-                        ));
+                    let mut request = routine_dictation_insertion_request(
+                        result.text.clone(),
+                        dictation_target_context_for_results.clone(),
+                    );
+                    let field_changed = field.as_ref().is_some_and(|field| !field.unchanged());
+                    if field_changed {
+                        request.mode = crate::text_insertion::TextInsertionMode::CopyOnly;
+                    }
+                    let mut insertion = crate::text_insertion::insert_text(request);
+                    if field_changed {
+                        insertion.message = "The text field or cursor changed. Your dictation is copied; choose where to paste it.".into();
+                    }
+                    if matches!(
+                        insertion.outcome,
+                        crate::text_insertion::InsertOutcome::Typed
+                            | crate::text_insertion::InsertOutcome::Pasted
+                    ) {
+                        crate::dictation_experience::remember_delivery(
+                            field.as_ref(),
+                            &result.text,
+                        );
+                    }
                     app_for_results.emit("dictation:insertion", &insertion).ok();
                     publish_dictation_overlay_state(&app_for_results, insertion.overlay_state());
                     log_dictation_insert(
@@ -23195,6 +23689,12 @@ pub fn cmd_set_shortcut(
 ) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
 
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::set_recovery_shortcut(
+            &app, &slot, enabled, shortcut, keycode,
+        );
+    }
+
     let slot = ShortcutSlot::from_str(&slot)?;
 
     // Validate shortcut string
@@ -23306,6 +23806,10 @@ pub fn cmd_shortcut_status(
 ) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
 
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::recovery_shortcut_status(&app, &slot);
+    }
+
     let slot = ShortcutSlot::from_str(&slot)?;
     let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
     let mgr = mgr_state
@@ -23317,6 +23821,9 @@ pub fn cmd_shortcut_status(
 #[tauri::command]
 pub fn cmd_suspend_shortcut(app: tauri::AppHandle, slot: String) -> Result<(), String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::suspend_recovery_shortcut(&app, &slot);
+    }
     let slot = ShortcutSlot::from_str(&slot)?;
     let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
     let mut mgr = mgr_state

@@ -619,14 +619,36 @@ mod windows_private {
     /// non-canonical (#800). The retained parent directory handle prevents the
     /// ambient path from being renamed while this call resolves it.
     pub(super) fn create_lease_file(path: &Path) -> io::Result<File> {
+        create_private_file(path, false)
+    }
+
+    /// Staged artifacts need delete sharing so their exact handle can survive
+    /// atomic publication. Lease handles deliberately retain the stricter mode.
+    pub(super) fn create_staged_file(path: &Path) -> io::Result<File> {
+        create_private_file(path, true)
+    }
+
+    fn create_private_file(path: &Path, renameable: bool) -> io::Result<File> {
         let wide = wide(path)?;
         let mut security = OwnerOnlySecurity::new(false)?;
         let attributes = security.attributes();
+        let access = GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER;
+        let sharing = FILE_SHARE_READ | FILE_SHARE_WRITE;
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                access
+                    | if renameable {
+                        0x0001_0000 /* DELETE */
+                    } else {
+                        0
+                    },
+                sharing
+                    | if renameable {
+                        0x0000_0004 /* FILE_SHARE_DELETE */
+                    } else {
+                        0
+                    },
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
@@ -703,6 +725,11 @@ pub(crate) fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 pub(crate) fn create_owner_only_lease_file(path: &Path) -> std::io::Result<File> {
     windows_private::create_lease_file(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_owner_only_staged_file(path: &Path) -> std::io::Result<File> {
+    windows_private::create_staged_file(path)
 }
 
 #[cfg(windows)]
