@@ -18890,35 +18890,4 @@ mod tests {
         assert!(log.contains("Facts written: 3, skipped: 1"));
         assert_eq!(log.matches("Q2 Pricing Call").count(), 2); // two appends
     }
-
-    /// Stands in for a machine where `qmd` was never installed.
-    #[allow(dead_code)]
-    struct AbsentQmdRunner;
-
-    impl QmdRunner for AbsentQmdRunner {
-        fn run_until(
-            &self,
-            _args: &[&str],
-            _deadline: Instant,
-        ) -> Result<QmdCommandResult, QmdRunError> {
-            Err(QmdRunError::Io {
-                kind: std::io::ErrorKind::NotFound,
-                message: "no such file or directory".into(),
-            })
-        }
-    }
-
-    /// Installed, but cannot be inspected.
-    #[allow(dead_code)]
-    struct BrokenQmdRunner;
-
-    impl QmdRunner for BrokenQmdRunner {
-        fn run_until(
-            &self,
-            _args: &[&str],
-            _deadline: Instant,
-        ) -> Result<QmdCommandResult, QmdRunError> {
-            Err(QmdRunError::Other("qmd exploded".into()))
-        }
-    }
 }

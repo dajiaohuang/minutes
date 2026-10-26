@@ -7,6 +7,9 @@ use std::path::Path;
 use std::process::Command;
 
 fn ffmpeg(args: &[&std::ffi::OsStr]) {
+    // Integration tests cannot use the crate-private engine process boundary.
+    // This subprocess only renders repository fixture audio for the test.
+    #[allow(clippy::disallowed_methods)]
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-nostdin", "-threads", "1"])
         .args(args)

@@ -203,7 +203,7 @@ jobs:
 
       - name: Clippy PocketStation capture (Windows)
         if: runner.os == 'Windows'
-        # Keep the temporary test-target carve-out visible until #1009 is resolved.
+        # Test targets are not linted on Windows yet: #1250.
         run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
 
       - name: Build core with parakeet (cross-platform)

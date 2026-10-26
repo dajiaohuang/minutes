@@ -1412,62 +1412,6 @@ mod macos_pasteboard {
         Ok(write_fn(pasteboard, sel("writeObjects:")?, array))
     }
 
-    #[cfg(test)]
-    mod clipboard_tests {
-        use super::*;
-        #[test]
-        fn native_rich_roundtrip_preserves_formats_and_yields_to_new_copies() {
-            unsafe {
-                let _pool = Pool::new().unwrap();
-                // Unique named board: never read or mutate the user's clipboard.
-                let board = msg_send_class_id(
-                    class("NSPasteboard").unwrap(),
-                    sel("pasteboardWithUniqueName").unwrap(),
-                );
-                assert!(!board.is_null());
-                let fixture = vec![std::collections::BTreeMap::from([
-                    ("public.utf8-plain-text".into(), b"fixture words".to_vec()),
-                    ("public.rtf".into(), b"{\\rtf1 fixture words}".to_vec()),
-                    ("public.png".into(), vec![0, 1, 2, 255]),
-                ])];
-                let original_count = msg_send_id_isize(board, sel("changeCount").unwrap()) as i64;
-                assert!(restore_to(board, fixture.clone(), original_count).unwrap());
-                let saved = snapshot_from(board).unwrap();
-                let captured = saved.items.clone().unwrap();
-                for (format, bytes) in &fixture[0] {
-                    assert_eq!(captured[0].get(format), Some(bytes));
-                }
-                // macOS can add equivalent UTF-16 representations. Preserve
-                // every captured format, including those added by the OS.
-                let inserted = vec![std::collections::BTreeMap::from([(
-                    "public.utf8-plain-text".into(),
-                    b"dictated words".to_vec(),
-                )])];
-                assert!(restore_to(board, inserted, saved.change_count).unwrap());
-                let after_insert = snapshot_from(board).unwrap();
-                assert!(restore_to(board, captured.clone(), after_insert.change_count).unwrap());
-                let restored = snapshot_from(board).unwrap();
-                assert_eq!(restored.items, Some(captured.clone()));
-                let newer = vec![std::collections::BTreeMap::from([(
-                    "public.utf8-plain-text".into(),
-                    b"newer copy".to_vec(),
-                )])];
-                assert!(restore_to(board, newer.clone(), restored.change_count).unwrap());
-                assert!(!restore_to(board, captured, restored.change_count).unwrap());
-                let final_items = snapshot_from(board).unwrap().items.unwrap();
-                assert_eq!(
-                    final_items[0].get("public.utf8-plain-text"),
-                    newer[0].get("public.utf8-plain-text")
-                );
-                assert!(!final_items[0].contains_key("public.rtf"));
-                assert!(!final_items[0].contains_key("public.png"));
-                let release: unsafe extern "C" fn(Id, Sel) =
-                    std::mem::transmute(objc_msgSend as *const ());
-                release(board, sel("releaseGlobally").unwrap());
-            }
-        }
-    }
-
     unsafe fn general_pasteboard() -> Result<Id, String> {
         let class = class("NSPasteboard")?;
         let pasteboard = msg_send_class_id(class, sel("generalPasteboard")?);
@@ -1607,6 +1551,62 @@ mod macos_pasteboard {
         let f: unsafe extern "C" fn(Id, Sel, *const c_void, NSUInteger, NSUInteger) -> Id =
             std::mem::transmute(objc_msgSend as *const ());
         f(receiver, selector, bytes, len, encoding)
+    }
+
+    #[cfg(test)]
+    mod clipboard_tests {
+        use super::*;
+        #[test]
+        fn native_rich_roundtrip_preserves_formats_and_yields_to_new_copies() {
+            unsafe {
+                let _pool = Pool::new().unwrap();
+                // Unique named board: never read or mutate the user's clipboard.
+                let board = msg_send_class_id(
+                    class("NSPasteboard").unwrap(),
+                    sel("pasteboardWithUniqueName").unwrap(),
+                );
+                assert!(!board.is_null());
+                let fixture = vec![std::collections::BTreeMap::from([
+                    ("public.utf8-plain-text".into(), b"fixture words".to_vec()),
+                    ("public.rtf".into(), b"{\\rtf1 fixture words}".to_vec()),
+                    ("public.png".into(), vec![0, 1, 2, 255]),
+                ])];
+                let original_count = msg_send_id_isize(board, sel("changeCount").unwrap()) as i64;
+                assert!(restore_to(board, fixture.clone(), original_count).unwrap());
+                let saved = snapshot_from(board).unwrap();
+                let captured = saved.items.clone().unwrap();
+                for (format, bytes) in &fixture[0] {
+                    assert_eq!(captured[0].get(format), Some(bytes));
+                }
+                // macOS can add equivalent UTF-16 representations. Preserve
+                // every captured format, including those added by the OS.
+                let inserted = vec![std::collections::BTreeMap::from([(
+                    "public.utf8-plain-text".into(),
+                    b"dictated words".to_vec(),
+                )])];
+                assert!(restore_to(board, inserted, saved.change_count).unwrap());
+                let after_insert = snapshot_from(board).unwrap();
+                assert!(restore_to(board, captured.clone(), after_insert.change_count).unwrap());
+                let restored = snapshot_from(board).unwrap();
+                assert_eq!(restored.items, Some(captured.clone()));
+                let newer = vec![std::collections::BTreeMap::from([(
+                    "public.utf8-plain-text".into(),
+                    b"newer copy".to_vec(),
+                )])];
+                assert!(restore_to(board, newer.clone(), restored.change_count).unwrap());
+                assert!(!restore_to(board, captured, restored.change_count).unwrap());
+                let final_items = snapshot_from(board).unwrap().items.unwrap();
+                assert_eq!(
+                    final_items[0].get("public.utf8-plain-text"),
+                    newer[0].get("public.utf8-plain-text")
+                );
+                assert!(!final_items[0].contains_key("public.rtf"));
+                assert!(!final_items[0].contains_key("public.png"));
+                let release: unsafe extern "C" fn(Id, Sel) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                release(board, sel("releaseGlobally").unwrap());
+            }
+        }
     }
 }
 

@@ -5133,14 +5133,16 @@ mod stem_content_tests {
         // Just under the threshold is corruption, at it is not, so the
         // constant means what the doc comment says rather than being
         // approximately right.
-        let mut under = StemContent::default();
-        under.written = 1000;
-        under.nonzero = (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64 - 1;
+        let under = StemContent {
+            written: 1000,
+            nonzero: (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64 - 1,
+        };
         assert!(under.looks_zero_stuffed());
 
-        let mut at = StemContent::default();
-        at.written = 1000;
-        at.nonzero = (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64;
+        let at = StemContent {
+            written: 1000,
+            nonzero: (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64,
+        };
         assert!(!at.looks_zero_stuffed());
     }
 }

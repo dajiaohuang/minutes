@@ -20368,7 +20368,7 @@ mod tests {
             for path in [&rejected_compressed, &failed_wav_move] {
                 assert!(items.iter().any(|item| {
                     item.kind == "watch-root-preserved"
-                        && PathBuf::from(&item.path) == *path
+                        && std::path::Path::new(&item.path) == path.as_path()
                         && item.detail.contains("cannot become invisible")
                 }));
             }
