@@ -1199,6 +1199,15 @@ function withoutContextSourceAuthorization<T extends Record<string, unknown>>(
   return publicValue;
 }
 
+
+// Relevance tier from minutes-sdk's lexicalMatch, compared before score. The
+// pinned SDK may predate the field; compareSearchMatches then ignores it, and
+// tiers take effect when the release moves the pin.
+function retrievalTier(match: unknown): number {
+  const tier = (match as { tier?: unknown } | null | undefined)?.tier;
+  return typeof tier === "number" ? tier : 0;
+}
+
 async function policyVerifiedMeetingSnapshots(
   dir: string,
   includeRestricted: boolean
@@ -1273,11 +1282,15 @@ export async function policySearchMeetings(
     (meeting) => reader.lexicalMatch(meeting.frontmatter.title, meeting.body, query) !== null,
     (snapshots) => {
       const results: PolicyVerifiedMeeting[] = [];
-      const ranked = snapshots.map((snapshot) => ({ snapshot, score: reader.lexicalMatch(snapshot.meeting.frontmatter.title, snapshot.meeting.body, query)?.score ?? 0 }));
-      ranked.sort((a, b) => reader.compareSearchMatches(
-        { score: a.score, date: a.snapshot.meeting.frontmatter.date, path: a.snapshot.path },
-        { score: b.score, date: b.snapshot.meeting.frontmatter.date, path: b.snapshot.path }
-      ));
+      const ranked = snapshots.map((snapshot) => {
+        const match = reader.lexicalMatch(snapshot.meeting.frontmatter.title, snapshot.meeting.body, query);
+        return { snapshot, score: match?.score ?? 0, tier: retrievalTier(match) };
+      });
+      ranked.sort((a, b) => {
+        const left = { tier: a.tier, score: a.score, date: a.snapshot.meeting.frontmatter.date, path: a.snapshot.path };
+        const right = { tier: b.tier, score: b.score, date: b.snapshot.meeting.frontmatter.date, path: b.snapshot.path };
+        return reader.compareSearchMatches(left, right);
+      });
       for (const { snapshot } of ranked) {
         results.push(snapshot.meeting);
         if (results.length >= boundedLimit) break;
@@ -1552,10 +1565,11 @@ export function collectPolicyToolSearchSnapshots(
     meeting.retrieval = reader.lexicalMatch(meeting.frontmatter.title, meeting.body, filter.query) ?? undefined;
     matches.push({ path: file.path, content: file.content, meeting });
   }
-  return matches.sort((a, b) => reader.compareSearchMatches(
-    { score: a.meeting.retrieval?.score ?? 0, date: a.meeting.frontmatter.date, path: a.path },
-    { score: b.meeting.retrieval?.score ?? 0, date: b.meeting.frontmatter.date, path: b.path }
-  )).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
+  return matches.sort((a, b) => {
+    const left = { tier: retrievalTier(a.meeting.retrieval), score: a.meeting.retrieval?.score ?? 0, date: a.meeting.frontmatter.date, path: a.path };
+    const right = { tier: retrievalTier(b.meeting.retrieval), score: b.meeting.retrieval?.score ?? 0, date: b.meeting.frontmatter.date, path: b.path };
+    return reader.compareSearchMatches(left, right);
+  }).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
 }
 
 async function policyToolSearchMeetings(
@@ -2243,7 +2257,7 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.30.0";
+const MCP_SERVER_VERSION = "0.30.10";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
@@ -2578,7 +2592,7 @@ export type EnsureWhisperModelOptions = {
   checkState?: WhisperModelCheckState;
   health?: () => Promise<string>;
   configFileExists?: () => Promise<boolean>;
-  setup?: (model?: string) => Promise<void>;
+  setup?: (model: string) => Promise<void>;
   log?: (message: string) => void;
 };
 
@@ -2601,8 +2615,10 @@ export async function ensureWhisperModel(
     });
     return stdout;
   });
-  const setup = options.setup ?? (async (model?: string) => {
-    const args = model === undefined ? ["setup"] : ["setup", "--model", model];
+  const setup = options.setup ?? (async (model: string) => {
+    // Background availability checks may install the selected model, but
+    // must never select another one or rewrite a concurrently edited config.
+    const args = ["setup", "--model", model, "--download-only"];
     await execFileAsync(MINUTES_BIN, args, {
       timeout: 300000,
       env: mcpCliChildEnv(),
@@ -2631,15 +2647,9 @@ export async function ensureWhisperModel(
     healthOutput.effectiveEngine?.toLowerCase() === "whisper" &&
     healthOutput.reason === "whisper: parakeet model missing — run minutes setup";
   if (parakeetModelMissing) {
-    log("[Minutes] Auto found the sherpa plugin but Parakeet is missing — running minutes setup...");
-    try {
-      await setup();
-      log("[Minutes] ✓ Parakeet and Whisper fallback models downloaded — recording is ready");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log(`[Minutes] Model download failed: ${message}. Run manually: minutes setup`);
-    }
-    return;
+    log(
+      "[Minutes] Parakeet is not installed — keeping your configured Whisper selection. Run minutes setup to install Parakeet; background setup will not change engines or models."
+    );
   }
 
   // Auto may resolve to sherpa when Parakeet v3 is installed. In that case
@@ -2699,16 +2709,16 @@ export async function ensureWhisperModel(
       );
       return;
     }
-    model = "tiny";
-    log("[Minutes] No Whisper model is configured — downloading tiny model (~75MB)...");
+    model = "small";
+    log("[Minutes] No Whisper model is configured — installing the default small model without changing saved settings...");
   }
 
   try {
     await setup(model);
-    log(`[Minutes] ✓ Whisper ${model} model downloaded — recording is ready`);
+    log(`[Minutes] ✓ Whisper ${model} model downloaded; saved selections were preserved`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log(`[Minutes] Model download failed: ${message}. Run manually: minutes setup --model ${model}`);
+    log(`[Minutes] Model download failed: ${message}. To install without changing your selection, run minutes setup --model ${model} --download-only. If the CLI does not support --download-only, upgrade Minutes first.`);
   }
 }
 
@@ -4661,10 +4671,13 @@ export function registerLiveEventsSubscriptionHandlers(
 // ── MCP Server ──────────────────────────────────────────────
 
 crashTrace("pre-mcp-server-construct");
+// Bound validation work before a tool schema sees untrusted arguments. Keep
+// this on every protocol instance, including per-session HTTP servers.
+const MCP_SERVER_OPTIONS = { maxToolInputElements: 10_000 };
 const server = new McpServer({
   name: "minutes",
   version: MCP_SERVER_VERSION,
-});
+}, MCP_SERVER_OPTIONS);
 crashTrace("post-mcp-server-construct");
 
 // ── Server instance registry ────────────────────────────────
@@ -4746,7 +4759,7 @@ export function createMinutesServer(): MinutesServerInstance {
   const instance = new McpServer({
     name: "minutes",
     version: MCP_SERVER_VERSION,
-  });
+  }, MCP_SERVER_OPTIONS);
   const teardowns: Array<() => void> = [];
   for (const build of SERVER_BUILDERS) {
     const teardown = build(instance);

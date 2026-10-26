@@ -1,0 +1,12 @@
+{
+  "exit": -9,
+  "reason": "cancelled",
+  "processing_seconds": 1.2685364589560777,
+  "sampled_group_peak_rss_bytes": 310722560,
+  "kernel_child_peak_rss_bytes": 310804480,
+  "rss_enforcement": "sampled watchdog; not a kernel memory limit",
+  "input_sha256_before": "b826877e3b2bbf8dc172c578017a06e6fbace086834f3ee9dfd73ccf6f212a8e",
+  "input_sha256_after": "b826877e3b2bbf8dc172c578017a06e6fbace086834f3ee9dfd73ccf6f212a8e",
+  "runner_sha256": "8539a04ba9388e72cac11c0115399eae4e413b321bd61ab87f116538e301b270",
+  "input_preserved": true
+}

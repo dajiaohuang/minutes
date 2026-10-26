@@ -136,7 +136,7 @@
 
     #terminal-container {
       flex: 1;
-      padding: 8px 4px 4px 4px;
+      min-height: 0;
       overflow: hidden;
     }
 
@@ -158,7 +158,9 @@
     }
 
     /* Override xterm background to match app */
-    .xterm { height: 100%; }
+    /* Padding lives on .xterm because FitAddon subtracts only this element's
+       padding; on the container it made the last row overflow the window. */
+    .xterm { height: 100%; padding: 8px 4px 4px 4px; }
     .xterm-viewport { overflow-y: auto; }
   </style>
 </head>
@@ -233,6 +235,16 @@
     term.onData((data) => {
       if (!isAlive) return;
       invoke('cmd_pty_input', { sessionId, data }).catch(console.error);
+    });
+
+    // Native file drops reach Tauri, not the DOM. Type the shell-escaped path
+    // the way Terminal.app does, so agents can attach a dropped screenshot.
+    await window.__TAURI__.webview.getCurrentWebview().onDragDropEvent((event) => {
+      const { type, paths } = event.payload;
+      if (type !== 'drop' || !isAlive || !paths?.length) return;
+      term.focus();
+      // Escape ASCII shell metacharacters only, as Terminal.app does.
+      term.paste(paths.map((p) => p.replace(/[ !"#$&'()*;<>?[\\\]^`{|}~]/g, '\\$&')).join(' ') + ' ');
     });
 
     // Receive PTY output — also listen on the generic event name in case

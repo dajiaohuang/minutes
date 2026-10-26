@@ -90,7 +90,9 @@ pub struct VocabularyEntry {
     /// These are offered to the decoder as terms to preserve.
     pub aliases: Vec<String>,
     /// Known wrong renderings of this term, kept so search and matching can find
-    /// an already-written transcript that contains them.
+    /// an already-written transcript that contains them. On acronym and term
+    /// entries they are also rewritten in new transcripts; see
+    /// [`VocabularyStore::spelling_corrections`].
     ///
     /// These are deliberately **never** offered to the decoder. Listing a
     /// misspelling in a prompt that says "preserve spelling exactly" teaches the
@@ -174,6 +176,42 @@ impl VocabularyEntry {
         forms.extend(self.aliases.iter().cloned());
         unique_clean_aliases(forms, "")
     }
+}
+
+/// One vocabulary spelling rewrite applied to a transcript, kept in the
+/// artifact's frontmatter so it stays auditable and reversible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SpellingCorrection {
+    /// The listed misspelling that was matched.
+    pub raw: String,
+    /// The canonical spelling written in its place.
+    pub corrected: String,
+    /// How many times it was replaced.
+    pub count: usize,
+}
+
+/// Rewrite each listed misspelling in `text` to its canonical spelling: exact
+/// phrase, whole words only, ignoring case, never fuzzy. `pairs` comes from
+/// [`VocabularyStore::spelling_corrections`]. Returns the text and what changed.
+pub fn correct_spellings(
+    text: &str,
+    pairs: &[(String, String)],
+) -> (String, Vec<SpellingCorrection>) {
+    let mut text = text.to_string();
+    let mut applied = Vec::new();
+    for (misspelling, canonical) in pairs {
+        let (next, count) =
+            crate::dictation_cleanup::replace_word_ci_counted(&text, misspelling, canonical);
+        if count > 0 {
+            text = next;
+            applied.push(SpellingCorrection {
+                raw: misspelling.clone(),
+                corrected: canonical.clone(),
+                count,
+            });
+        }
+    }
+    (text, applied)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +318,55 @@ impl VocabularyStore {
             }
         }
         phrases
+    }
+
+    /// Explicit `(misspelling, canonical)` rewrites for a finished transcript,
+    /// longest misspelling first so a phrase wins over its sub-words.
+    ///
+    /// Only acronym and term entries take part: names have their own
+    /// participant-gated correction pass. Only listed misspellings are used,
+    /// never aliases, since an alias is something people really say. A
+    /// misspelling claimed by two entries, or one that is also another entry's
+    /// canonical or alias, is ambiguous and left alone: a wrong rewrite is
+    /// worse than none.
+    pub fn spelling_corrections(&self) -> Vec<(String, String)> {
+        let mut legitimate = HashSet::new();
+        for entry in &self.entries {
+            for form in entry.hint_forms() {
+                legitimate.insert(key_for(&form));
+            }
+        }
+        let mut targets: HashMap<String, (String, Option<String>)> = HashMap::new();
+        for entry in &self.entries {
+            if !matches!(entry.kind, VocabularyKind::Acronym | VocabularyKind::Term) {
+                continue;
+            }
+            for misspelling in &entry.misspellings {
+                let key = key_for(misspelling);
+                if key.is_empty() || legitimate.contains(&key) {
+                    continue;
+                }
+                targets
+                    .entry(key)
+                    .and_modify(|(_, canonical)| {
+                        if canonical.as_deref() != Some(entry.canonical.as_str()) {
+                            *canonical = None;
+                        }
+                    })
+                    .or_insert_with(|| (misspelling.clone(), Some(entry.canonical.clone())));
+            }
+        }
+        let mut pairs: Vec<(String, String)> = targets
+            .into_values()
+            .filter_map(|(misspelling, canonical)| canonical.map(|c| (misspelling, c)))
+            .collect();
+        pairs.sort_by(|a, b| {
+            b.0.chars()
+                .count()
+                .cmp(&a.0.chars().count())
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        pairs
     }
 
     pub fn search_expansions(&self, query: &str) -> Vec<String> {
@@ -783,6 +870,123 @@ mod tests {
         assert_eq!(
             store.decode_phrases(2),
             vec!["Automattic".to_string(), "Automatic".to_string()]
+        );
+    }
+
+    fn soc2_store() -> VocabularyStore {
+        VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Acronym,
+                    canonical: "SOC 2".into(),
+                    misspellings: vec![
+                        "Sok 2".into(),
+                        "Saka 2".into(),
+                        "SOC two".into(),
+                        "Sok two".into(),
+                    ],
+                    ..VocabularyEntry::default()
+                },
+                // Names have their own participant-gated pass; their
+                // misspellings never rewrite text here.
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Mathieu".into(),
+                    misspellings: vec!["Matthew".into()],
+                    ..VocabularyEntry::default()
+                },
+            ],
+        }
+        .normalized()
+        .expect("normalize")
+    }
+
+    #[test]
+    fn listed_misspellings_rewrite_to_the_canonical_spelling() {
+        let pairs = soc2_store().spelling_corrections();
+        let (text, applied) = correct_spellings(
+            "[0:01] We need Sok 2 before launch.\n[0:05] saka 2, then SOC Two again. Sok 20 is a part number.\n",
+            &pairs,
+        );
+        assert_eq!(
+            text,
+            "[0:01] We need SOC 2 before launch.\n[0:05] SOC 2, then SOC 2 again. Sok 20 is a part number.\n"
+        );
+        let mut seen: Vec<_> = applied
+            .iter()
+            .map(|c| (c.raw.as_str(), c.corrected.as_str(), c.count))
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("SOC two", "SOC 2", 1),
+                ("Saka 2", "SOC 2", 1),
+                ("Sok 2", "SOC 2", 1)
+            ]
+        );
+        // Person misspellings are not rewritten by this pass.
+        assert_eq!(
+            correct_spellings("Matthew joined", &pairs).0,
+            "Matthew joined"
+        );
+    }
+
+    #[test]
+    fn ambiguous_misspellings_are_left_alone() {
+        let store = VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Term,
+                    canonical: "Tauri".into(),
+                    misspellings: vec!["tory".into(), "towery".into()],
+                    ..VocabularyEntry::default()
+                },
+                // Claimed by a second entry: unclear which was meant. (Loading
+                // already rejects this within one kind; check the pass anyway.)
+                VocabularyEntry {
+                    kind: VocabularyKind::Term,
+                    canonical: "Torii".into(),
+                    misspellings: vec!["tory".into()],
+                    ..VocabularyEntry::default()
+                },
+                // A real alias elsewhere: people really say it.
+                VocabularyEntry {
+                    kind: VocabularyKind::Organization,
+                    canonical: "Towery Labs".into(),
+                    aliases: vec!["Towery".into()],
+                    ..VocabularyEntry::default()
+                },
+            ],
+        };
+        assert!(store.spelling_corrections().is_empty());
+    }
+
+    #[test]
+    fn longer_misspellings_are_applied_first() {
+        let store = VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Term,
+                    canonical: "MCP server".into(),
+                    misspellings: vec!["M C P server".into()],
+                    ..VocabularyEntry::default()
+                },
+                VocabularyEntry {
+                    kind: VocabularyKind::Acronym,
+                    canonical: "MCP".into(),
+                    misspellings: vec!["M C P".into()],
+                    ..VocabularyEntry::default()
+                },
+            ],
+        }
+        .normalized()
+        .expect("normalize");
+        let pairs = store.spelling_corrections();
+        assert_eq!(pairs[0].0, "M C P server");
+        assert_eq!(
+            correct_spellings("the M C P server and M C P tools", &pairs).0,
+            "the MCP server and MCP tools"
         );
     }
 

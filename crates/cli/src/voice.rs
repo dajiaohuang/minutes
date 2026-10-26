@@ -331,7 +331,6 @@ pub(crate) fn run(action: VoiceAction, config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
     fn retiring_voice_storage_keeps_the_original_file_until_worker_finishes() {
@@ -366,13 +365,13 @@ mod tests {
             vec!["minutes", "voice", "remove", "mat"],
             vec!["minutes", "voice", "delete-all"],
         ] {
-            assert!(crate::Cli::try_parse_from(args).is_ok());
+            assert!(crate::tests::parse_cli(args).is_ok());
         }
     }
 
     #[test]
     fn voice_cli_enroll_defaults_to_twenty_five_seconds() {
-        let cli = crate::Cli::try_parse_from(["minutes", "voice", "enroll"]).unwrap();
+        let cli = crate::tests::parse_cli(["minutes", "voice", "enroll"]).unwrap();
         let crate::Commands::Voice {
             action: VoiceAction::Enroll { seconds },
         } = cli.command

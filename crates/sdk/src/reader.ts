@@ -13,7 +13,7 @@
 //                      listMeetings()      searchMeetings()
 
 import { realpath, stat } from "fs/promises";
-import { lexicalMatch, compareSearchMatches, queryTokens, type LexicalMatch } from "./retrieval.js";
+import { lexicalMatch, compareSearchMatches, contentQuery, queryTokens, relaxedQueries, type LexicalMatch } from "./retrieval.js";
 import { buildSourceEvidence, type EvidenceBundle } from "./evidence.js";
 import { buildDecisionHistory, type DecisionHistoryEntry, type HistoricalDecision } from "./decision-history.js";
 import { resolvePersonIdentity, meetingHasPersonParticipant, personOwnsAction } from "./identity.js";
@@ -145,6 +145,7 @@ export interface Frontmatter {
   entities?: { people?: Array<{ slug?: string; label: string; aliases?: string[] }> };
   /** Applied post-pass name corrections (raw token preserved), if any. */
   name_corrections?: { raw: string; corrected: string }[];
+  spelling_corrections?: { raw: string; corrected: string; count: number }[];
   recording_health?: RecordingHealth;
 }
 
@@ -756,14 +757,36 @@ export async function searchMeetings(
   const boundedLimit = normalizeMeetingResultLimit(limit);
   if (queryTokens(query).length === 0) return [];
 
+  const meant = contentQuery(query);
   return stableMeetingOperation(dir, opts, "search_meetings", (meetings) => {
-    const matches = meetings.flatMap((meeting) => {
-      const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, query);
+    const matchAll = (wanted: string) => meetings.flatMap((meeting) => {
+      const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, wanted);
       return retrieval ? [{ meeting, retrieval }] : [];
     });
-    matches.sort((a, b) => compareSearchMatches(
-      { score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
-      { score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
+    // Stopwords are optional. Below 10 full matches, meetings that match all
+    // but one term fill in after them (each by its best such query); a title
+    // match still outranks words scattered through a transcript (as Rust).
+    const matches = matchAll(meant).map((match) => ({ ...match, complete: true }));
+    if (matches.length < 10) {
+      const seen = new Set(matches.map((match) => match.meeting.path));
+      const best = new Map<string, (typeof matches)[number]>();
+      for (const relaxed of relaxedQueries(meant)) {
+        for (const match of matchAll(relaxed)) {
+          if (seen.has(match.meeting.path)) continue;
+          const held = best.get(match.meeting.path);
+          if (!held || compareSearchMatches(
+            { tier: match.retrieval.tier, score: match.retrieval.score, date: "", path: "" },
+            { tier: held.retrieval.tier, score: held.retrieval.score, date: "", path: "" }
+          ) < 0) best.set(match.meeting.path, { ...match, complete: false });
+        }
+      }
+      matches.push(...best.values());
+    }
+    const rank = (match: (typeof matches)[number]) =>
+      (match.retrieval.tier >= 2 ? 2 : 0) + (match.complete ? 1 : 0);
+    matches.sort((a, b) => rank(b) - rank(a) || compareSearchMatches(
+      { tier: a.retrieval.tier, score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
+      { tier: b.retrieval.tier, score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
     ));
     return matches.slice(0, boundedLimit).map(({ meeting, retrieval }) => ({
       ...meeting, retrieval, evidence: evidenceFromMeeting(meeting, query),

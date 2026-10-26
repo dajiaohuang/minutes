@@ -594,6 +594,14 @@ def main() -> int:
     runtime_supported = runtime_supported_match.group(1) == "true"
     if args.runtime and not runtime_supported:
         raise RuntimeError("signed Apple Speech worker did not run the analyzer")
+    # The product gate opens standalone live transcript and nothing else; the
+    # signed app prints both verdicts and refuses to accept if either is wrong.
+    for marker in (
+        "apple-speech-live-product-gate=open",
+        "apple-speech-dictation-product-gate=closed",
+    ):
+        if marker not in result.stdout.splitlines():
+            raise RuntimeError(f"signed app did not report the product gate scope: {marker}")
     if "apple-speech-signed-parent-trusted=true" not in result.stdout:
         raise RuntimeError(
             "signed app did not confirm it evaluated its signing authority as trusted"
@@ -624,7 +632,8 @@ def main() -> int:
         "sameUid": os.geteuid(),
         "heldNewRegularFiles": len(held_contents),
         "namedAudioCanaryObserved": False,
-        "productGateExpectedClosed": True,
+        "liveProductGateOpen": True,
+        "dictationProductGateOpen": False,
         "signedByteTransport": "accepted",
         "signedWorkerRuntime": "accepted" if args.runtime else "not-run",
         # Transport-only acceptance intentionally leaves runtimeSupported

@@ -1,0 +1,64 @@
+{
+  "source": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+  "license": "CC-BY-4.0",
+  "attribution": "AMI Project manual annotations v1.6.2, published April10,2017; orthographic word timing",
+  "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d",
+  "files": [
+    {
+      "name": "TS3004a.D.words.xml",
+      "sha256": "fa092f90f60d975aeb7c05d24faca5a114389f8ed32fda5f8f203e9c9af8bedd"
+    },
+    {
+      "name": "TS3004a.A.words.xml",
+      "sha256": "45ae99d88e3fdeb448d6576bb105521cf60b79cd6c55daa36ef92f45c87abf87"
+    },
+    {
+      "name": "IS1008a.D.words.xml",
+      "sha256": "e7f475b606a950de682d275b912821f3d3d612136ce62bd41bc685146767f40b"
+    },
+    {
+      "name": "IS1008a.C.words.xml",
+      "sha256": "d61e501c37877f731058889d799e7ff5a3d19494b8a22f12c7f0f50a87c62758"
+    },
+    {
+      "name": "TS3004a.B.words.xml",
+      "sha256": "85bd23005095a510210df0d4989165b1edc5c9a843aa44b8e123de2e545fc381"
+    },
+    {
+      "name": "IB4001.A.words.xml",
+      "sha256": "5364f0c350b0bdc59475d23ad031ed147606d972d7e61838f7afb3dafa67cf85"
+    },
+    {
+      "name": "IS1008a.B.words.xml",
+      "sha256": "4a92c5b967c6a32fdfc4a288b7a61064d7259710b6afb32c27e49e4bd146f322"
+    },
+    {
+      "name": "IB4001.B.words.xml",
+      "sha256": "7e15e366ef4dbd32e05a6e6a233a8fbe13c5c7cff38f4521f03f68fead2770d2"
+    },
+    {
+      "name": "IB4001.C.words.xml",
+      "sha256": "fc9b8127d86814e466d1666e7c41949b57b3db28aa8537342ce008e477963254"
+    },
+    {
+      "name": "TS3004a.C.words.xml",
+      "sha256": "e62fa4ffecf1c98bca72d7707b1b8a33165be89f59028c5dca46b4163cfe090d"
+    },
+    {
+      "name": "IB4001.D.words.xml",
+      "sha256": "5b3668e27ad5b72a6ed2078bfa8f5bc6bfbb20eb09c76b5404837de31a0f6668"
+    },
+    {
+      "name": "IS1008a.A.words.xml",
+      "sha256": "db744e8ca1f45f794e288c5521ab5dfbc2b2f8e5e9f814dd5300053cdab09a2d"
+    }
+  ],
+  "task": "oracle-word-attribution",
+  "meeteval_version": "0.4.3",
+  "tcpwer_collar_seconds": 0.5,
+  "timing": "Each normalized token retains its official XML word interval; full_segment pseudo timing on both sides. Not sentence-level ASR timing.",
+  "normalization": "metrics.words: Unicode casefold, preserve apostrophes and decimals; lexical w nodes only, retain fillers. Invalid/missing/nonpositive/out-of-file spans excluded and counted.",
+  "attribution_policy": "Exactly one unique known predicted speaker intersecting the word interval; no activity, UNKNOWN activity or multiple speakers abstains. Same-speaker fragments may have gaps; no minimum covered fraction. No reference identity used.",
+  "abstention_scoring": "Abstained words omitted from hypothesis speaker streams, retained in reference, incur attribution deletions. Actual text is not deleted; UNKNOWN is never a free mapped speaker.",
+  "qualification": "Descriptive follow-up frozen after model DER predictions but before word scoring. Oracle text and timing isolate attribution; not end-to-end ASR WER, production word alignment, a new promotion gate or a named-identity test."
+}

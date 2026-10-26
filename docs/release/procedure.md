@@ -2,6 +2,14 @@
 
 **When shipping a new version, walk through every item in order.**
 
+**Package with the publisher's runtime.** Run Phase 2 and tag preflight on Linux
+with Node **22.14.0** and npm **11.5.1**, matching `release-publish.yml`. Different
+Node gzip implementations can produce different npm integrity hashes even when
+every file and the uncompressed tar are identical. For example, use
+`npx --yes --package=node@22.14.0 --package=npm@11.5.1 --call 'node scripts/release.mjs phase2 X.Y.Z'`
+and the same prefix for `tag`. Before tagging, resolve any canonical SDK integrity
+mismatch reported by Linux CI; do not publish against a different archive hash.
+
 ### 1. Version bump (every source must match)
 ```bash
 # Preview the complete Domain-1 patch without touching this checkout, then apply it.
@@ -152,6 +160,12 @@ parallel it publishes `minutes-core`, waits for its crates.io API visibility,
 then publishes `minutes-cli`. Every publish is idempotent for safe workflow
 reruns. See [Trusted publishing setup](trusted-publishing.md) for the one-time
 registry configuration.
+
+npm may accept a signed publish while continuing to process the package. The
+visibility check allows ten minutes of backoff and verifies the exact tarball
+integrity before dependent publication. If processing outlasts that window,
+inspect the accepted publish and registry state, then rerun the failed job;
+never replace the version or tag to retry a delayed registry response.
 
 ### 11. Wait for release assets and registry publishes, then publish the draft
 
@@ -314,7 +328,7 @@ install, and a version comparison would call it fine.
 
 **The formula stages a second pinned asset.** Since silverstein/homebrew-tap#5
 the formula compiles the CLI with `engine-sherpa` and installs the signed
-plugin from that release's `minutes-macos-arm64-sherpa.tar.gz`, pinned by URL
+plugin and shared libraries from that release's `minutes-macos-arm64-sherpa-shared.tar.gz`, pinned by URL
 and `sha256`. The bump script moves that pin with the tag and the verifier
 checks it, so this needs no manual step. It is called out because the failure
 is quiet: a formula whose version line is correct can still stage the previous

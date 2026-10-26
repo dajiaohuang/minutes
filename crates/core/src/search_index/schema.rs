@@ -8,7 +8,10 @@
 //! - `meeting_attendees` (B-tree, normalized): preserves the existing
 //!   case-insensitive substring filter semantics.
 //! - `meetings_fts` (FTS5, owns its content): title + body, with literal Unicode
-//!   tokenization + diacritic-stripping + 2/3/4-char prefix index.
+//!   tokenization + diacritic-stripping. No prefix index: the projection is
+//!   rebuilt in memory for every search, and 2/3/4-char prefix indexes tripled
+//!   that build (~2 s at ~1,100 meetings) to save well under a millisecond on
+//!   the one query that follows. FTS5 still answers `term*` without them.
 //! - `sync_state` (B-tree, key/value): tracks the indexed `output_dir` for
 //!   full-rebuild on directory changes.
 //!
@@ -253,8 +256,7 @@ const SCHEMA_SQL: &str = r#"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS meetings_fts USING fts5(
         title, body,
-        tokenize='unicode61 remove_diacritics 2',
-        prefix='2 3 4'
+        tokenize='unicode61 remove_diacritics 2'
     );
 
     CREATE TABLE IF NOT EXISTS sync_state (

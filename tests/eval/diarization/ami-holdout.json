@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "task": "diarization",
+  "provenance": {
+    "independent_blinding": false,
+    "synthetic": false,
+    "selection": "Two unscored full AMI test meetings from the EN2002 group, distinct from the ES2004 development and IS1009/TS3003 first-admission groups; same speakers across these two meetings, not population independence."
+  },
+  "gates": {
+    "minimum_der_improvement": 0.05,
+    "maximum_recording_regression": 0.03,
+    "maximum_real_time_factor": 0.25
+  },
+  "recordings": [
+    {
+      "id": "EN2002a",
+      "audio": "EN2002a.Array1-01.wav",
+      "sha256": "6c0644431679e59adc70129f2ba6c2fb737fa731cf1ffe8a033cd7f0c441170e",
+      "reference": "EN2002a.rttm",
+      "reference_sha256": "a93919ae5f18e476614b7e5a2713c4dc6bba23e95149fba18dbe68602b13ee40",
+      "duration": 2142.709375,
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Meeting Corpus, AMI Project; RTTM conversion: pyannote/AMI-diarization-setup, 67c2d539286e89f68952d5dcf83912bd9f01dfae"
+      },
+      "split": "holdout",
+      "conditions": {
+        "language": "en",
+        "microphone": "Array1-01",
+        "human": true
+      }
+    },
+    {
+      "id": "EN2002b",
+      "audio": "EN2002b.Array1-01.wav",
+      "sha256": "e3650cc84250caa0992ac0398f4a3127a8c14ed2c93edc10535245335cc41077",
+      "reference": "EN2002b.rttm",
+      "reference_sha256": "c4e6ef3f9f493d82d14664a9669479aca378de05639e4640f02f8398e2ef714a",
+      "duration": 1786.848,
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Meeting Corpus, AMI Project; RTTM conversion: pyannote/AMI-diarization-setup, 67c2d539286e89f68952d5dcf83912bd9f01dfae"
+      },
+      "split": "holdout",
+      "conditions": {
+        "language": "en",
+        "microphone": "Array1-01",
+        "human": true
+      }
+    }
+  ]
+}

@@ -3,7 +3,11 @@
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
-const DEFAULT_POLL_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000, 45_000];
+// npm can accept a signed publish while processing it for over five minutes.
+// Allow ten minutes of bounded registry backoff; integrity checks still fail
+// immediately on a different package. This does not affect corpus deadlines.
+const DEFAULT_POLL_DELAYS_MS = [5, 10, 20, 40, 60, 60, 60, 60, 60, 60, 60, 60, 45]
+  .map((seconds) => seconds * 1_000);
 
 function registryUrl() {
   const configured = process.env.NPM_REGISTRY_URL ?? DEFAULT_NPM_REGISTRY_URL;

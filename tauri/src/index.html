@@ -550,13 +550,24 @@
       display: block;
     }
 
-    .recall-weekly-view pre {
-      margin: 0;
-      white-space: pre-wrap;
-      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
-      font-size: var(--text-xs);
-      line-height: 1.6;
+    .recall-weekly-view .md-prose {
+      font-size: var(--text-body);
+      line-height: 1.55;
       color: var(--text-secondary);
+    }
+
+    .recall-weekly-view .md-prose h1 {
+      font-size: var(--text-lg, 17px);
+      margin: 0 0 12px;
+    }
+
+    .recall-weekly-view .md-prose h2 {
+      font-size: var(--text-2xs);
+      font-family: var(--font-mono);
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 18px 0 8px;
     }
 
     .recall-close {
@@ -593,18 +604,28 @@
       flex: 1;
       min-height: 0;
       overflow: hidden;
-      /* fit() rounds rows against the padded box; without this the last row
-         (the TUI status line) sat half under the pane edge. */
-      padding-bottom: 6px;
       margin: 0;
       border-radius: 0;
       border: none;
       background: var(--bg);
     }
 
-    .recall-terminal .xterm-screen {
-      padding-top: 10px;
-      padding-left: 5px;
+    /* Outline, not an inset shadow: xterm's canvas covers the box's own paint,
+       and outlines draw above content. */
+    .recall-terminal.is-drop-target {
+      outline: 2px solid var(--accent-border-strong);
+      outline-offset: -2px;
+    }
+
+    /* Inset the grid with padding on .xterm and nowhere else. FitAddon sizes
+       rows from the container's computed height (which, with border-box,
+       already includes the container's own padding) minus the padding of
+       .xterm itself. Padding on .xterm-screen or on the container is invisible
+       to it, so the rows it proposed overflowed by that much and the last one
+       (the TUI status line) sat half under the pane edge. */
+    .recall-terminal .xterm {
+      height: 100%;
+      padding: 10px 0 6px 5px;
     }
 
     .recall-terminal .xterm .xterm-viewport {
@@ -1913,6 +1934,16 @@
       margin-right: 6px;
     }
 
+    /* Open, Recall has its own header and close button beside the list, so
+       the toggle only repeats it. Show it as the way in, not the way out. */
+    .recall-toggle-btn[aria-expanded="true"] {
+      display: none;
+    }
+
+    .recall-toggle-btn[aria-expanded="true"] + .list-toggle-btn {
+      margin-left: auto;
+    }
+
     .sidebar-collapse-btn {
       width: 28px;
       height: 28px;
@@ -2813,6 +2844,19 @@
       font-weight: 600;
     }
 
+    .meeting-item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .meeting-list-end {
+      padding: 14px 0 18px;
+      text-align: center;
+      font-size: var(--text-2xs);
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+    }
+
     .date-group {
       font-size: var(--text-2xs);
       font-family: var(--font-mono);
@@ -2907,6 +2951,11 @@
     .meeting-item:hover {
       background: var(--bg-hover);
       box-shadow: 0 1px 4px var(--shadow-soft);
+    }
+
+    /* Finder-style ring on the row a context menu is acting on. */
+    .meeting-item.is-menu-target {
+      box-shadow: inset 0 0 0 1.5px var(--accent-border-strong);
     }
 
     .document-item {
@@ -3073,7 +3122,8 @@
 
     .detail-close-x {
       position: absolute;
-      top: 12px;
+      /* Centred on the header's action row (18px padding + 28px controls). */
+      top: 18px;
       right: 14px;
       width: 28px;
       height: 28px;
@@ -3110,9 +3160,13 @@
       letter-spacing: -0.2px;
       color: var(--text);
       margin-bottom: 6px;
-      white-space: nowrap;
+      line-height: 1.2;
+      /* Two lines before truncating: long meeting titles are the norm. */
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
       overflow: hidden;
-      text-overflow: ellipsis;
+      overflow-wrap: anywhere;
     }
 
     .detail-meta {
@@ -3132,33 +3186,110 @@
 
     .detail-actions {
       display: flex;
-      flex-wrap: wrap;
+      flex: none;
+      align-items: center;
       gap: 8px;
-      justify-content: flex-end;
-      padding-right: 28px;
-      /* This row declares no `flex` shorthand, so it is `flex: 0 1 auto` and its
-         flex base size is its MAX-CONTENT width — every button on one line,
-         even though flex-wrap then wraps them onto two. Space is distributed
-         from those base sizes, so when a fifth button pushed the row's base
-         past what the header had, the header stopped handing leftovers to
-         .detail-header-copy and started shrinking it instead, until the copy
-         froze on its 16.5ch min-width while the wrapped row sat half empty.
-         Measured at the normal 762px card: 33 title characters with four
-         buttons, 21 with five.
-         max-width does not change the base size — the base is computed first,
-         then clamped — but clamping the row's hypothetical size is enough to
-         put the header back into "distribute the leftovers", and the leftovers
-         go to the title. The 22rem term is a floor on the cap, not on the row:
-         on narrow cards the row already needs more than half the header, and
-         capping it there would only force another wrapped line and a taller
-         header. So the effective rule is "half the header, but never less than
-         22rem" — above ~44rem of header the 50% term wins, below it the 22rem
-         term does. rem, not px, because UI zoom drives :root font-size.
-         Known cost, measured: at zoom >= 20 with a window wide enough that all
-         five buttons would have fitted on one line, the cap wraps them onto two
-         and the header grows 3-5px. At the default zoom there is no such width
-         — the row never fits on one line there. */
-      max-width: max(50%, 22rem);
+      /* Clears the absolutely positioned close button. */
+      padding-right: 32px;
+    }
+
+    /* The app's secondary buttons are uppercase, which put two casings side
+       by side with "Create Draft" here. Match the primary's sentence case. */
+    .detail-actions .btn-secondary {
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: var(--text-xs);
+      font-weight: 500;
+    }
+
+    .detail-more-btn {
+      width: 28px;
+      height: 28px;
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-secondary);
+      fill: currentColor;
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      -webkit-app-region: no-drag;
+    }
+
+    .detail-more-btn:hover,
+    .detail-more-btn[aria-expanded="true"] {
+      background: var(--bg-hover);
+      border-color: var(--border-mid);
+      color: var(--text);
+    }
+
+    .detail-more-btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px var(--focus-ring);
+    }
+
+    .action-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 20px;
+      z-index: 400;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      max-width: min(460px, calc(100vw - 32px));
+      padding: 9px 10px 9px 16px;
+      border-radius: 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-mid);
+      box-shadow: 0 12px 32px var(--shadow-strong);
+      color: var(--text);
+      font-size: var(--text-body);
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, 8px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+
+    .action-toast.is-visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translate(-50%, 0);
+    }
+
+    .action-toast.is-error {
+      border-color: var(--red-border-strong);
+    }
+
+    .action-toast-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .action-toast-btn {
+      flex: none;
+      padding: 4px 10px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .action-toast-btn:hover,
+    .action-toast-btn:focus-visible {
+      background: var(--accent-tint);
+      outline: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .action-toast { transition: none; }
     }
 
     .detail-scroll {
@@ -3281,7 +3412,11 @@
 
     .detail-action-check {
       flex-shrink: 0;
-      font-size: var(--text-sm);
+      width: 14px;
+      height: 14px;
+      margin: 3px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
     }
 
     .detail-action-text {
@@ -3492,6 +3627,38 @@
       word-break: break-word;
     }
 
+    .md-prose {
+      white-space: normal;
+    }
+
+    .md-prose > :first-child { margin-top: 0; }
+    .md-prose > :last-child { margin-bottom: 0; }
+    .md-prose p { margin: 0 0 8px; }
+    .md-prose ul,
+    .md-prose ol { margin: 0 0 8px; padding-left: 20px; }
+    .md-prose li { margin: 3px 0; }
+    .md-prose h1,
+    .md-prose h2,
+    .md-prose h3 {
+      font-size: var(--text-body);
+      font-weight: 600;
+      color: var(--text);
+      margin: 12px 0 6px;
+    }
+    .md-prose strong { color: var(--text); font-weight: 600; }
+    .md-prose code {
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      background: var(--surface-hover, rgba(127, 127, 127, 0.12));
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+
+    mark.mark-current {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
     mark {
       background: var(--orange-border);
       color: var(--text);
@@ -3520,6 +3687,10 @@
       font-weight: 400;
       color: var(--text);
       margin-bottom: 6px;
+    }
+
+    .empty-state .empty-state-action {
+      margin-top: 14px;
     }
 
     .empty-state .sub {
@@ -4232,6 +4403,15 @@
       gap: 5px;
     }
 
+    .recording-audio-help {
+      margin: 0;
+      font-size: var(--text-2xs);
+      line-height: 1.5;
+      color: var(--text-secondary);
+    }
+    .recording-audio-help[data-error="true"] { color: var(--red); }
+    .onboarding-audio-choice { margin: 12px 0; }
+
     .footer-action-secondary .btn[hidden] {
       display: none !important;
     }
@@ -4450,6 +4630,58 @@
       display: flex;
     }
 
+    .upcoming-dismiss {
+      flex: none;
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-secondary);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .upcoming-dismiss:hover,
+    .upcoming-dismiss:focus-visible {
+      background: var(--bg-hover);
+      color: var(--text);
+      outline: none;
+    }
+
+    .settings-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .settings-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 4px 3px 10px;
+      border: 1px solid var(--border-mid);
+      border-radius: 999px;
+      font-size: var(--text-xs);
+      color: var(--text);
+    }
+
+    .settings-chip button {
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font: inherit;
+      padding: 0 4px;
+      border-radius: 999px;
+    }
+
+    .settings-chip button:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+
     .upcoming-icon {
       font-size: var(--text-base);
       flex-shrink: 0;
@@ -4477,63 +4709,6 @@
 
     .upcoming .btn {
       flex-shrink: 0;
-    }
-
-    .ambient-context-card {
-      margin: 10px 0 14px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .ambient-context-title {
-      font-size: var(--text-meta);
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-      color: var(--text-tertiary);
-    }
-
-    .ambient-chip {
-      display: inline-block;
-      margin: 0 6px 6px 0;
-      padding: 3px 8px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--bg);
-      color: var(--text-secondary);
-      font-family: var(--font-mono);
-      font-size: var(--text-2xs);
-      letter-spacing: 0.04em;
-    }
-
-    .ambient-chip-btn {
-      cursor: pointer;
-      color: var(--text);
-      border-color: var(--border-mid);
-    }
-
-    .ambient-chip-btn:hover,
-    .ambient-chip-btn:focus-visible {
-      border-color: var(--accent);
-      outline: none;
-    }
-
-    .ambient-context-summary {
-      font-size: var(--text-body);
-      line-height: 1.5;
-      color: var(--text-secondary);
-      white-space: pre-wrap;
-    }
-
-    .ambient-context-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
     }
 
     /* ── Call detected banner ──
@@ -5342,12 +5517,13 @@
       gap: 12px;
     }
 
-    /* On non-macOS (Windows/Linux) the OS window stays wide when the panel is
-       collapsed, so the `padding: 16px` above — combined with `width: 0` and
-       `box-sizing: border-box` — leaves a ~32px phantom column on the right.
-       On macOS the window shrinks to 520px on collapse (below any threshold),
-       so this was never visible there. Zero the padding only when collapsed. */
-    html:not([data-platform="macos"]) .recall-panel:not(.expanded) {
+    /* With the panel collapsed, the `padding: 16px` above — combined with
+       `width: 0` and `box-sizing: border-box` — leaves a ~32px phantom column
+       on the right. This used to be gated to non-macOS on the theory that the
+       Mac window shrinks to 520px on collapse; it does not when the window
+       keeps its saved width, and the column showed as a gray strip. Zero the
+       padding whenever collapsed, on every platform. */
+    .recall-panel:not(.expanded) {
       padding: 0;
     }
 
@@ -5972,7 +6148,7 @@
             id="recall-nudge" aria-label="Recall has new content"></span></button>
         <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
       </div>
-      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
+      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
       <div class="search-error" id="search-error" hidden></div>
     </div>
 
@@ -5998,6 +6174,7 @@
         <div class="upcoming-time" id="upcoming-time"></div>
       </div>
       <button class="btn btn-primary btn-sm" id="btn-record-upcoming">Record</button>
+      <button class="upcoming-dismiss" id="btn-dismiss-upcoming" type="button" aria-haspopup="menu" aria-label="Hide this suggestion" title="Hide this suggestion">&times;</button>
     </div>
 
     <!-- Call detected banner -->
@@ -6129,6 +6306,15 @@
         <div class="footer-action-primary">
           <button class="btn btn-primary" id="btn-record">Start Recording</button>
         </div>
+        <div class="footer-device-picker" id="meeting-audio-choice">
+          <label class="footer-device-label" for="meeting-audio-source">Meeting audio</label>
+          <select id="meeting-audio-source" class="device-picker" aria-describedby="meeting-audio-help">
+            <option value="" disabled selected>Choose audio to record</option>
+            <option value="microphone-and-system">Microphone + system audio</option>
+            <option value="microphone">Microphone only</option>
+          </select>
+          <p id="meeting-audio-help" class="recording-audio-help" aria-live="polite">Choose the audio for your meeting.</p>
+        </div>
         <div class="footer-device-picker">
           <div class="footer-device-label">Microphone</div>
           <select id="device-picker" class="device-picker" title="Select microphone">
@@ -6191,7 +6377,7 @@
     </div>
     <div class="recall-provider-notice" id="recall-provider-notice" role="status" aria-live="polite"></div>
     <div class="recall-weekly-view" id="recall-weekly-view">
-      <pre id="recall-weekly-content">Loading weekly summary…</pre>
+      <div id="recall-weekly-content" class="md-prose">Loading weekly summary…</div>
     </div>
     <div class="recall-terminal hidden" id="recall-terminal-container"></div>
     <!-- Recall private Chat panel, shown only when a verified provider is available -->
@@ -6265,11 +6451,14 @@
           <div class="detail-meta" id="detail-meta"></div>
         </div>
         <div class="detail-actions">
-          <button class="btn btn-primary btn-sm" id="btn-create-artifact">Create Draft</button>
           <button class="btn btn-secondary btn-sm" id="btn-discuss-ai">Discuss with Agent</button>
-          <button class="btn btn-secondary btn-sm" id="btn-resummarize">Resummarize</button>
-          <button class="btn btn-secondary btn-sm" id="btn-open-external">Open in Editor</button>
-          <button class="btn btn-danger btn-sm" id="btn-delete-meeting">Delete</button>
+          <button class="btn btn-primary btn-sm" id="btn-create-artifact">Create Draft</button>
+          <button class="detail-more-btn" id="btn-detail-more" type="button" aria-haspopup="menu" aria-label="More actions" title="More actions">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.35"/><circle cx="8" cy="8" r="1.35"/><circle cx="12.5" cy="8" r="1.35"/></svg>
+          </button>
+          <!-- Resummarize keeps its state machine on this button; the ⋯ menu
+               drives it, so it stays in the DOM without taking header space. -->
+          <button class="btn btn-secondary btn-sm" id="btn-resummarize" hidden>Resummarize</button>
         </div>
       </div>
       <div class="detail-feedback" id="detail-feedback" hidden></div>
@@ -6277,6 +6466,11 @@
         <div class="detail-empty">Select a meeting to view transcript and notes.</div>
       </div>
     </div>
+  </div>
+
+  <div class="action-toast" id="action-toast" role="status" aria-live="polite">
+    <span class="action-toast-text" id="action-toast-text"></span>
+    <button class="action-toast-btn" id="action-toast-undo" type="button" hidden>Undo</button>
   </div>
 
   <div class="artifact-template-overlay" id="artifact-template-overlay">
@@ -6618,6 +6812,7 @@
             <select id="settings-transcription-engine" class="settings-field">
               <option value="auto">Auto (Whisper)</option>
               <option value="whisper">Whisper — broad language support, built-in</option>
+              <option value="sherpa" disabled>Parakeet v3 — unavailable</option>
               <option value="parakeet" disabled>Parakeet — unavailable</option>
               <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
@@ -6628,12 +6823,15 @@
           <div class="about-controls-group">
             <div class="about-controls-copy">Whisper model</div>
             <select id="settings-whisper-model" class="settings-field">
-              <option value="tiny">tiny — 75 MB, fastest, lower quality</option>
-              <option value="base">base — 148 MB, fast, decent quality</option>
+              <option value="base">base — 142 MB, lower resource use</option>
               <option value="small">small — 466 MB, good quality (recommended)</option>
               <option value="medium">medium — 1.5 GB, great quality</option>
               <option value="large-v3">large-v3 — 3.1 GB, best quality</option>
+              <optgroup label="Advanced: lower memory, lower accuracy">
+                <option value="tiny">tiny — 75 MB, explicit low-resource choice</option>
+              </optgroup>
             </select>
+            <div class="about-controls-meta is-hidden" id="settings-tiny-model-note">Tiny is selected. For more reliable meeting transcripts, choose Small or a larger model and download it. Your current selection is preserved until you change it.</div>
             <div class="settings-section-inline settings-section-inline-tight">
               <div class="about-controls-meta settings-model-status" id="settings-model-status"></div>
               <button class="btn btn-secondary btn-sm is-hidden" id="btn-download-model">Download</button>
@@ -6830,13 +7028,26 @@
           <summary>Advanced</summary>
           <div class="about-controls">
             <div class="about-controls-group">
+              <div class="about-controls-copy">Dictation engine</div>
+              <select id="settings-dictation-backend" class="settings-field">
+                <option value="auto">Auto</option>
+                <option value="whisper">Whisper — every language</option>
+                <option value="sherpa">Parakeet v3 — most accurate final text</option>
+              </select>
+              <div class="about-controls-meta" id="settings-dictation-backend-detail">Whisper shows words as you speak and writes the final text.</div>
+            </div>
+          </div>
+          <div class="about-controls">
+            <div class="about-controls-group">
               <div class="about-controls-copy">Dictation whisper model</div>
               <select id="settings-dictation-model" class="settings-field">
-                <option value="tiny">tiny — fastest, lower quality</option>
                 <option value="base">base — fast, decent quality (default)</option>
                 <option value="small">small — good quality, slower</option>
                 <option value="medium">medium — more accurate, slower</option>
                 <option value="large-v3">large-v3 — highest Whisper quality, most memory</option>
+                <optgroup label="Advanced: lower memory, lower accuracy">
+                  <option value="tiny">tiny — explicit low-resource choice</option>
+                </optgroup>
               </select>
               <div class="about-controls-meta">Larger Whisper models use more memory and take longer. Install a missing model above, or manage models in Transcription settings.</div>
             </div>
@@ -6943,6 +7154,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
 </div></div></div>
       <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
+      <!-- Search by meaning -->
+      <div class="settings-section">
+        <div class="about-item-title">SEARCH BY MEANING</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Find meetings by what they were about, not only the words in them</div>
+            <div class="about-controls-meta" id="settings-semantic-meta">Runs Google's EmbeddingGemma 2 on this Mac. Turning it on downloads a 310 MB model once and keeps a small index in ~/.minutes/semantic. Restricted meetings are never indexed. Turning it off deletes the index.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-semantic-search">Off</button>
+        </div>
+        <div class="about-controls-meta" id="settings-semantic-status" role="status" hidden></div>
+      </div>
       <!-- Coach settings start -->
       <div class="settings-section coach-settings-section" id="settings-coach-section">
         <div class="coach-section-heading">
@@ -7134,6 +7357,32 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="about-controls-meta">Shell command run after each recording is processed. The transcript file path is appended as the final argument. Leave blank to disable.</div>
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Calendar -->
+      <div class="settings-section">
+        <div class="about-item-title">CALENDAR</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Only suggest events with other people or a meeting link</div>
+            <div class="about-controls-meta">Off by default, because events you add yourself for in-person meetings often have no invitees. This only changes upcoming-meeting suggestions and which event a recording is matched to. You can always record.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-calendar-require-attendees">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Hidden calendars</div>
+            <div class="about-controls-meta">Events from these calendars are never suggested. Add one from the × on a suggestion.</div>
+            <div class="settings-chip-list" id="settings-calendar-hidden-calendars"></div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Hidden events</div>
+            <div class="about-controls-meta">Events whose title contains any of these are never suggested.</div>
+            <div class="settings-chip-list" id="settings-calendar-hidden-titles"></div>
           </div>
         </div>
       </div>
@@ -7593,6 +7842,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
   <script src="scripts/shortcut-recorder.js"></script>
   <script src="scripts/recall-contract.js"></script>
+  <script src="scripts/update-offer.js"></script>
+  <script src="scripts/recording-audio.js"></script>
   <script src="scripts/recall-chat.js"></script>
   <script>
     const { invoke } = window.__TAURI__.core;
@@ -7648,7 +7899,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const detailCard = document.querySelector('.detail-card');
     const detailScroll = document.getElementById('detail-scroll');
     const resummarizeBtn = document.getElementById('btn-resummarize');
-    const openExternalBtn = document.getElementById('btn-open-external');
     const aboutOverlay = document.getElementById('about-overlay');
     const aboutVersion = document.getElementById('about-version');
     const aboutWebsiteButton = document.getElementById('btn-about-website');
@@ -7738,16 +7988,25 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let documentsRefreshTimer = null;
     let documentsRenderedSignature = '';
     let documentsCache = [];
+    let lastMeetingInventory = [];
+    // Sidebar rows render in chunks (appendMeetingRows); declared here, with
+    // the other list state, so the first render never hits the TDZ.
+    const MEETING_ROWS_CHUNK = 80;
+    let meetingRowsState = null;
+    let previousRendered = 0;
+    let detailReturnFocusPath = null;
     let documentsLoadRequestId = 0;
     let userExpandedSidebarThisSession = false;
     let sidebarAutoCollapsed = false;
     let meetingsRefreshTimer = null;
     let currentSetup = null;
     let activationState = null;
-    let proactiveContextBundle = null;
     let latestOutput = null;
     let detailFeedbackTimer = null;
     let resummarizeConfirmTimer = null;
+    // Set by the ⋯ menu: choosing Resummarize there is already a deliberate
+    // second step, so the inline Confirm? round is skipped.
+    let resummarizeSkipConfirm = false;
     let resummarizeStatusPollTimer = null;
     let resummarizeStatusRequestId = 0;
     let detailOpenRequestId = 0;
@@ -7861,116 +8120,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
-    let proactiveContextLoadedAt = 0;
-    let proactiveContextLoadPromise = null;
-    let proactiveContextLoadGeneration = -1;
-    let proactiveContextGeneration = 0;
-    async function loadProactiveContextBundle() {
-      const now = Date.now();
-      if (proactiveContextBundle && now - proactiveContextLoadedAt < 60_000) {
-        return proactiveContextBundle;
-      }
-      if (proactiveContextLoadPromise) {
-        const inFlight = proactiveContextLoadPromise;
-        if (proactiveContextLoadGeneration === proactiveContextGeneration) {
-          return inFlight;
-        }
-        await inFlight;
-        return loadProactiveContextBundle();
-      }
-      const generation = proactiveContextGeneration;
-      const loadPromise = (async () => {
-        try {
-          const bundle = await invoke('cmd_proactive_context_bundle');
-          if (generation === proactiveContextGeneration) {
-            proactiveContextBundle = bundle;
-            proactiveContextLoadedAt = Date.now();
-          }
-        } catch (e) {
-          console.error('Proactive context bundle:', e);
-          if (generation === proactiveContextGeneration) {
-            proactiveContextBundle = null;
-          }
-        }
-        return proactiveContextBundle;
-      })();
-      proactiveContextLoadPromise = loadPromise;
-      proactiveContextLoadGeneration = generation;
-      try {
-        return await loadPromise;
-      } finally {
-        if (proactiveContextLoadPromise === loadPromise) {
-          proactiveContextLoadPromise = null;
-          proactiveContextLoadGeneration = -1;
-        }
-      }
-    }
-
-    function invalidateProactiveContextBundle() {
-      proactiveContextGeneration += 1;
-      proactiveContextBundle = null;
-      proactiveContextLoadedAt = 0;
-    }
-
-    function appendProactiveContextCard() {
-      if (!proactiveContextBundle) return;
-      const total =
-        (proactiveContextBundle.recentMeetingCount || 0) +
-        (proactiveContextBundle.recentMemoCount || 0) +
-        (proactiveContextBundle.staleCommitmentCount || 0) +
-        (proactiveContextBundle.losingTouchCount || 0);
-      if (total === 0) return;
-
-      const card = document.createElement('div');
-      card.className = 'ambient-context-card';
-
-      const title = document.createElement('div');
-      title.className = 'ambient-context-title';
-      title.textContent = 'Ambient Context';
-
-      const summary = document.createElement('div');
-      summary.className = 'ambient-context-summary';
-      // Counts as chips. Only the ones that lead somewhere are buttons:
-      // stale commitments have a section in the weekly brief, memos live in
-      // the Documents view. Losing-touch has no surface yet, so it stays a
-      // number rather than a tap that goes nowhere.
-      const chip = (label, onClick) => {
-        const el = document.createElement(onClick ? 'button' : 'span');
-        el.className = 'ambient-chip' + (onClick ? ' ambient-chip-btn' : '');
-        if (onClick) { el.type = 'button'; el.addEventListener('click', onClick); }
-        el.textContent = label;
-        return el;
-      };
-      const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-      const b = proactiveContextBundle;
-      const chips = [];
-      if (b.recentMeetingCount) chips.push(chip(plural(b.recentMeetingCount, 'meeting', 'meetings')));
-      if (b.recentMemoCount) chips.push(chip(plural(b.recentMemoCount, 'memo', 'memos'), () => setDocumentsView(true)));
-      if (b.staleCommitmentCount) chips.push(chip(plural(b.staleCommitmentCount, 'stale commitment', 'stale commitments'), () => openWeeklyPhase()));
-      if (b.losingTouchCount) chips.push(chip(plural(b.losingTouchCount, 'losing-touch alert', 'losing-touch alerts')));
-      if (chips.length) summary.replaceChildren(...chips);
-      else summary.textContent = b.summary || 'Recent context is available.';
-
-      const actions = document.createElement('div');
-      actions.className = 'ambient-context-actions';
-
-      // Open Recall used to live here too; Recall now has a permanent home in
-      // the list header, so the card keeps only what is unique to it.
-      const weeklyBtn = document.createElement('button');
-      weeklyBtn.className = 'btn btn-secondary btn-sm';
-      weeklyBtn.textContent = 'Weekly';
-      weeklyBtn.addEventListener('click', () => {
-        openWeeklyPhase();
-      });
-
-      actions.appendChild(weeklyBtn);
-
-      card.appendChild(title);
-      card.appendChild(summary);
-      card.appendChild(actions);
-      meetingsScroll.appendChild(card);
-    }
-
     function applyActivationState(root, activation) {
       if (!root || !activation) return;
       const milestones = activation.milestones || {};
@@ -7981,11 +8130,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const watchStep = root.querySelector('#step-watch-artifact');
       const watchStatus = root.querySelector('#step-watch-artifact-status');
 
-      if (activation.hasModel || milestones.modelReadyAt) {
-        modelStep?.classList.add('done');
+      // A past download milestone does not prove the currently selected
+      // model is installed. Current readiness wins after a selection change
+      // or a failed companion install.
+      const modelReady = activation.hasModel === true;
+      modelStep?.classList.toggle('done', modelReady);
+      modelBody?.classList.toggle('ui-hidden', modelReady);
+      if (modelReady) {
         setText(modelStatus, 'Done');
-        modelBody?.classList.add('ui-hidden');
         artifactStep?.classList.remove('disabled');
+      } else {
+        setText(modelStatus, 'Needs setup');
+        artifactStep?.classList.add('disabled');
       }
 
       if (milestones.firstRecordingStartedAt) {
@@ -8000,6 +8156,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else if (activation.phase === 'processing-first-artifact' || activation.phase === 'recording-first-artifact') {
         watchStep?.classList.remove('disabled');
         setText(watchStatus, activation.phase === 'processing-first-artifact' ? 'Processing...' : 'Recording...');
+      }
+      const firstRecording = root.querySelector('#btn-start-first-recording');
+      if (firstRecording) {
+        firstRecording.dataset.modelReady = String(modelReady);
+        renderMeetingAudioChoice();
       }
     }
 
@@ -8116,10 +8277,33 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
+    // Look up a select option by value, remembering it after it has been
+    // detached so a later settings load can put it back.
+    function settingsSelectOption(select, value) {
+      select._minutesOptions = select._minutesOptions || {};
+      const option = select.querySelector(`option[value="${value}"]`) || select._minutesOptions[value] || null;
+      if (option) select._minutesOptions[value] = option;
+      return option;
+    }
+
+    // Detach rather than hide: WebKit's native select menu does not reliably
+    // honor `hidden` on options. `before` lists anchors in order; the option
+    // goes in front of the first one currently in the select.
+    function setSettingsOptionPresent(select, option, present, before) {
+      if (!select || !option) return;
+      if (present && option.parentNode !== select) {
+        const anchor = (before || []).find((candidate) => candidate && candidate.parentNode === select) || null;
+        select.insertBefore(option, anchor);
+      } else if (!present && option.parentNode === select) {
+        option.remove();
+      }
+    }
+
     function backendLabel(backend) {
       switch (backend) {
         case 'apple-speech': return 'Apple Speech';
         case 'parakeet': return 'Parakeet';
+        case 'sherpa': return 'Parakeet v3';
         case 'whisper': return 'Whisper';
         case 'inherit': return 'your main transcription engine';
         default: return backend || 'Whisper';
@@ -8132,22 +8316,28 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return list.map(backendLabel).join(' -> ');
     }
 
-    function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine) {
+    function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine, appleSpeechSelectable = false) {
       const fallbackText = fallbackOrderLabel(fallbackOrder);
       const batchLabel = backendLabel(batchEngine);
+      const appleHint = appleSpeechSelectable && resolvedBackend !== 'apple-speech'
+        ? ' Apple Speech is available on this Mac and is recommended for live transcript.'
+        : '';
       if (selectedBackend === 'inherit') {
-        return `Standalone live transcript currently inherits ${backendLabel(resolvedBackend)} from the main transcription engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription stay on ${batchLabel}.`;
+        return `Standalone live transcript currently inherits ${backendLabel(resolvedBackend)} from the main transcription engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription stay on ${batchLabel}.${appleHint}`;
       }
       if (selectedBackend === 'apple-speech') {
+        if (resolvedBackend === 'apple-speech') {
+          return `Standalone live transcript uses Apple Speech (experimental) through Minutes' signed speech worker, which receives audio in memory rather than through temporary files. The session's own audio is still saved when live_transcript.save_wav is on (the default). If Apple Speech fails, the session switches to the next engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+        }
         return `The retained Apple Speech preference cannot receive secure private audio yet, so standalone live transcript resolves to ${backendLabel(resolvedBackend)}. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
       }
       if (selectedBackend === 'parakeet') {
         if (resolvedBackend !== 'parakeet') {
           return `The retained Parakeet preference is unavailable, so standalone live transcript resolves to ${backendLabel(resolvedBackend)}. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
         }
-        return `Standalone live transcript uses Parakeet. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+        return `Standalone live transcript uses Parakeet. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.${appleHint}`;
       }
-      return `Standalone live transcript will use Whisper. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+      return `Standalone live transcript will use Whisper. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.${appleHint}`;
     }
 
     function currentModeLabel(mode) {
@@ -8542,8 +8732,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       elapsedSecs = 0,
       recording = false,
       stopping = false,
+      disabled = false,
     } = {}) {
       if (stopping) return 'Finishing transcript…';
+      // Off by configuration is a choice, not a failure: no "Preparing" wait.
+      if (disabled) return 'Recording · Live transcript off';
       if (diagnostic) {
         if (recording && elapsedSecs < 4) return 'Preparing transcript…';
         return recording
@@ -8714,6 +8907,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             elapsedSecs: elapsedClockSeconds(status.elapsed),
             recording: true,
             stopping: stopRequested,
+            disabled: recordingLive.disabled === true,
           });
           document.getElementById('btn-stop').disabled = !!stopRequested;
 
@@ -9003,6 +9197,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         setTitle(liveButton, 'Start live transcription — ask your agent in Recall for coaching');
         setTitle(quickThoughtButton, '');
       }
+      queueMicrotask(renderMeetingAudioChoice);
     }
 
     function copilotStateName(snapshot = copilotSnapshot) {
@@ -9753,6 +9948,53 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     // ── Device picker ──
     const devicePicker = document.getElementById('device-picker');
+    const meetingAudioSource = document.getElementById('meeting-audio-source');
+    const meetingAudioHelp = document.getElementById('meeting-audio-help');
+    const recordingAudioChoice = window.MinutesRecordingAudio.create({
+      persist: value => invoke('cmd_set_setting', { section: 'recording', key: 'desktop_audio_source', value }),
+      changed: renderMeetingAudioChoice,
+    });
+
+    const renderedMeetingAudioChoices = new WeakMap();
+    function renderMeetingAudioChoice() {
+      const state = recordingAudioChoice.snapshot();
+      for (const picker of [meetingAudioSource, document.getElementById('onboarding-meeting-audio-source')]) {
+        if (!picker) continue;
+        // Idle status polling also renders this surface. Reassigning a native
+        // select while its popup is tracking can discard the user's selection
+        // before WebKit delivers change. Only apply a new acknowledged choice
+        // or roll back a rejected save so the same option can be retried.
+        const choice = state.choice || '';
+        const rendered = renderedMeetingAudioChoices.get(picker);
+        if (!rendered || rendered.choice !== choice || (state.error && rendered.error !== state.error)) {
+          if (picker.value !== choice) picker.value = choice;
+        }
+        renderedMeetingAudioChoices.set(picker, { choice, error: state.error });
+        const disabled = state.pending || footer.classList.contains('capture-mode');
+        if (picker.disabled !== disabled) picker.disabled = disabled;
+      }
+      const helpText = state.error || (state.pending ? 'Saving audio choice…'
+        : state.choice === 'microphone' ? 'Your microphone only. People on a computer call are not included.'
+        : state.choice === 'microphone-and-system' ? 'Your microphone and computer audio. Other apps may also be captured.'
+        : 'Choose the audio for your meeting.');
+      for (const help of [meetingAudioHelp, document.getElementById('onboarding-meeting-audio-help')]) {
+        if (!help) continue;
+        help.textContent = helpText;
+        help.dataset.error = state.error ? 'true' : 'false';
+      }
+      const firstRecording = document.getElementById('btn-start-first-recording');
+      if (firstRecording) firstRecording.disabled = !state.ready || firstRecording.dataset.modelReady !== 'true'
+        || footer.classList.contains('capture-mode');
+      if (!footer.classList.contains('capture-mode')) {
+        syncPrimaryCaptureLabel();
+      }
+    }
+    meetingAudioSource.addEventListener('change', () => recordingAudioChoice.save(meetingAudioSource.value));
+    window.__TAURI__.event.listen('recording:audio-source-required', () => {
+      setFooterCaptureMode(false);
+      applyCaptureMode('meeting');
+      (document.getElementById('onboarding-meeting-audio-source') || meetingAudioSource).focus();
+    });
     const dictationMicrophonePicker = document.getElementById('settings-dictation-microphone');
     function populateDevicePicker(picker, result) {
       if (!picker) return;
@@ -9784,11 +10026,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     async function loadDevices() {
+      const audioLoad = recordingAudioChoice.beginLoad();
       try {
         const result = await invoke('cmd_list_devices');
         // Prefer structured entries so we persist canonical CPAL names. Both
         // pickers share one setting and therefore always render the same value.
         populateDevicePicker(devicePicker, result);
+        recordingAudioChoice.load(result.desktop_audio_source, audioLoad);
 
       } catch (e) {
         console.error('Load devices:', e);
@@ -9813,10 +10057,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
     // ── Recording controls ──
     function recordingStartArgsForCurrentUi() {
-      if (activeCallSession && !activeCallSession.dismissed && callBanner.classList.contains('active')) {
-        return { intent: 'call', source: 'call_detect' };
-      }
-      return undefined;
+      return recordingAudioChoice.startArgs({ detected: Boolean(activeCallSession && !activeCallSession.dismissed && callBanner.classList.contains('active')) });
     }
 
     let pendingRecordingStartArgs = null;
@@ -9850,10 +10091,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     // Palette / tray / hotkey / desktop-control starts under Require mode
     // arrive as a backend event rather than a JS invoke result; show the
-    // same modal (review F1/F2). Confirm restarts with pipeline defaults.
+    // same modal (review F1/F2). Keep the requested audio route through consent.
     window.__TAURI__.event.listen('minutes://recording-consent-required', (event) => {
       const disclosure = event?.payload?.disclosure || '';
-      showRecordingConsentModal(disclosure, {});
+      showRecordingConsentModal(disclosure, event?.payload?.args || {});
     });
 
     function showRecordingStartError(error) {
@@ -9904,6 +10145,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       recordButton.textContent = CAPTURE_MODE_LABELS[captureMode];
+      recordButton.disabled = captureMode === 'meeting' ? !recordingAudioChoice.snapshot().ready
+        : captureMode === 'memo' ? quickThoughtButton.disabled : liveButton.disabled;
+      document.getElementById('meeting-audio-choice').classList.toggle('is-hidden', captureMode !== 'meeting');
     }
 
     function applyCaptureMode(mode, { persist = true } = {}) {
@@ -9912,6 +10156,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         seg.setAttribute('aria-checked', seg.dataset.captureMode === captureMode ? 'true' : 'false');
       });
       syncPrimaryCaptureLabel();
+      renderMeetingAudioChoice();
       if (persist) {
         try { localStorage.setItem('minutes.captureMode', captureMode); } catch (_) { }
       }
@@ -9988,37 +10233,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     });
 
-    // ── Delete meeting ──
-    document.getElementById('btn-delete-meeting').addEventListener('click', async () => {
-      const pathToDelete = currentMeetingPath;
-      if (!pathToDelete) return;
-      try {
-        // Confirmation dialog is shown natively by the Rust command
-        const result = await invoke('cmd_delete_meeting', {
-          path: pathToDelete,
-          withAudio: true,
-          force: false,
-        });
-        if (result === 'Cancelled') return;
-        console.log(result);
-        closeDetailView();
-        loadMeetings();
-      } catch (e) {
-        console.error('Delete:', e);
-      }
-    });
-
-    // The card is centred in the overlay (.detail-overlay { align-items:
-    // center }), so a card shorter than its max-height grows symmetrically
-    // when content is added — moving the header, and the wrapping
-    // .detail-actions row with it, UP by half the growth. That is how a
-    // resting pointer ends up over the red Delete button. Holding the card's
-    // height makes .detail-scroll (overflow-y: auto) absorb the change
-    // instead. The hold is owned by the banner lifecycle and nothing else:
-    // showDetailFeedback() takes it, clearDetailFeedback() releases it. Those
-    // are the only two call sites — keep it that way, because tying it to the
-    // button instead let an unawaited status refresh release it underneath a
-    // report that was already on screen.
+    // The card is vertically centred, so content that grows it moves the
+    // header actions up under a resting pointer. Holding its height makes
+    // .detail-scroll absorb the growth instead. The banner lifecycle owns the
+    // hold: showDetailFeedback() takes it and clearDetailFeedback() releases
+    // it. Keep those the only call sites.
     function pinDetailCardHeight() {
       if (!detailCard) return;
       // Idempotent on purpose. The banner is shown repeatedly during one
@@ -10169,22 +10388,24 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     resummarizeBtn.addEventListener('click', async () => {
       const path = currentMeetingPath;
       if (!path) return;
+      const skipConfirm = resummarizeSkipConfirm;
+      resummarizeSkipConfirm = false;
       if (resummarizeBtn.disabled) {
         showDetailFeedback('Another meeting is being resummarized — try again when it finishes.');
         return;
       }
       // Two-step inline confirm: the AI pass has real cost, so an accidental
       // click must not fire it. Never window.confirm — WKWebView breaks it.
-      if (!resummarizeConfirmTimer) {
+      if (!resummarizeConfirmTimer && !skipConfirm) {
         // Pin the current width before shortening the label. "Confirm?" is
         // narrower than "Resummarize", and without this the actions row
-        // reflows and slides "Open in Editor" under the cursor — so the
+        // reflows and slides the next button under the cursor — so the
         // second click of a double-click lands on the wrong button.
         resummarizeBtn.style.minWidth = `${resummarizeBtn.offsetWidth}px`;
         // The vertical twin of the width pin above is handled for us:
         // showDetailFeedback() holds the card height before it shows the hint
         // banner below, so the growing banner cannot slide this row up under
-        // the cursor and put "Delete" where the second click lands.
+        // the cursor and put another action where the second click lands.
         resummarizeBtn.textContent = 'Confirm?';
         showDetailFeedback(
           'Click again to regenerate the AI summary. A timestamped backup will be saved.',
@@ -10209,9 +10430,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         failure = e;
         console.error('Resummarize:', e);
       } finally {
-        // Restore the button here, before the outcome is rendered below. The
-        // render used to live inside this try, which put the reset *after* it
-        // and let the reset clobber what had just been drawn.
+        // Reset before the outcome renders below, or the reset clobbers it.
         resetResummarizeButton();
       }
 
@@ -10389,16 +10608,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       liveTransitionTarget = targetActive;
       button.disabled = true;
       button.textContent = label;
-      // Safety net: if the confirming event never arrives (a wedged session, a
-      // dropped event) the control must not stay disabled forever. Restoring it
-      // is always safe -- the worst case is the user clicking again.
-      //
-      // The budget is per-transition because the two are not comparable.
-      // Starting waits on a model load. Stopping emits :stopped only after the
-      // whole session finishes, which with live_transcript.promote_on_stop =
-      // process includes the meeting pipeline and can legitimately run for
-      // minutes; a short rescue there would revert "Stopping..." mid-run and
-      // recreate the very "did my click register?" state this fixes.
+      // Safety net: if the confirming event never arrives, re-enable the
+      // control (the worst case is a second click). The budget is per
+      // transition: starting waits on a model load, but stopping can run the
+      // whole meeting pipeline (promote_on_stop) for minutes.
       liveTransitionTimer = window.setTimeout(function rescue() {
         // Never contradict observed state. A stop legitimately runs long -- the
         // stop path completes the whole meeting pipeline before emitting
@@ -10443,11 +10656,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     document.getElementById('btn-live').addEventListener('click', async () => {
       const btn = document.getElementById('btn-live');
-      // Acknowledge the click before anything else. On first use the explainer
-      // below deliberately waits three seconds before the start even begins, and
-      // the control used to sit untouched through it -- so the honest reading of
-      // "I clicked Live and nothing happened" is that, for three seconds,
-      // nothing had.
       // #1110: standalone Live hears one microphone only. On a call through
       // headphones that misses the other side entirely, so whenever native
       // call capture is usable Go Live records the microphone and this Mac's
@@ -10457,6 +10665,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         await startBothSidesCapture(activeCallSession?.app_name || null);
         return;
       }
+      // Acknowledge the click before the first-use explainer's three-second wait.
       beginLiveTransition(btn, 'Starting...', 60000, true, 'Live');
 
       // First-use explainer (shown once, stored in localStorage)
@@ -10470,7 +10679,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (noticeTitle) noticeTitle.textContent = 'Live Transcript';
         if (noticeDetail) noticeDetail.textContent = 'Transcribes your meeting in real time, including the other side of a call. Ask your agent in Recall for coaching during the call.';
         if (notice) notice.classList.add('active');
-        // Auto-dismiss after 4 seconds, then proceed with start
+        // Auto-dismiss after 3 seconds, then proceed with start
         await new Promise(r => setTimeout(r, 3000));
         if (notice) notice.classList.remove('active');
       }
@@ -10570,6 +10779,195 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       await createArtifactFromMeetingPath(currentMeetingDetail.path, 'debrief-memo');
     });
 
+    // ── Meeting actions menu ──
+    // One list of actions behind both the detail view's ⋯ button and a
+    // right-click on a sidebar row. It is a native menu, so it looks, scrolls
+    // and keyboard-navigates like Finder's. Archive sits last, past a
+    // separator, and needs no confirmation: it only moves files into the
+    // archive folder, and the Undo toast that follows puts them back.
+    const { Menu } = window.__TAURI__.menu;
+    const { LogicalPosition } = window.__TAURI__.dpi;
+    const menuLabel = (text) => window.MinutesI18n?.t(text) || text;
+
+    async function showMeetingActionsMenu(meeting, { context, at } = {}) {
+      const action = (label, fn) => async () => {
+        try {
+          await fn();
+        } catch (e) {
+          console.error(`${label}:`, e);
+          showActionToast(`${label} failed: ${e?.message || e}`, { tone: 'error' });
+        }
+      };
+      const items = [];
+      if (context === 'sidebar') {
+        items.push(
+          { text: menuLabel('Open'), action: action('Open', () => openMeetingDetail(meeting.path)) },
+          {
+            text: menuLabel('Discuss with Agent'),
+            action: action('Discuss with Agent', () => discussMeetingWithAgent(meeting.path, meeting.title)),
+          },
+          { item: 'Separator' },
+        );
+      } else {
+        const running = resummarizeBtn.disabled;
+        items.push(
+          {
+            text: menuLabel(running ? 'Resummarizing…' : 'Resummarize'),
+            enabled: !running,
+            action: () => {
+              resummarizeSkipConfirm = true;
+              resummarizeBtn.click();
+            },
+          },
+          { item: 'Separator' },
+        );
+      }
+      items.push(
+        { text: menuLabel('Rename…'), action: action('Rename', () => renameMeeting(meeting)) },
+        {
+          text: menuLabel('Copy as Markdown'),
+          action: action('Copy as Markdown', async () => {
+            await invoke('palette_execute', {
+              ui: { currentMeeting: meeting.path },
+              action: { id: 'copy-meeting-markdown' },
+            });
+            showActionToast('Copied as Markdown');
+          }),
+        },
+        { item: 'Separator' },
+        { text: menuLabel('Open in Editor'), action: action('Open in Editor', () => invoke('cmd_open_file', { path: meeting.path })) },
+        {
+          text: menuLabel(desktopCapabilities.folderRevealLabel || 'Show in Folder'),
+          action: action('Reveal', () => invoke('cmd_reveal_path', { path: meeting.path })),
+        },
+        {
+          text: menuLabel('Copy Path'),
+          action: action('Copy Path', async () => {
+            await invoke('cmd_copy_path', { path: meeting.path });
+            showActionToast('Path copied');
+          }),
+        },
+        { item: 'Separator' },
+        { text: menuLabel('Archive'), action: action('Archive', () => archiveMeeting(meeting)) },
+      );
+      const menu = await Menu.new({ items });
+      // On macOS popup() resolves when the menu closes, which is what lets
+      // callers hold a highlight on the row or button for exactly that long.
+      await menu.popup(at ? new LogicalPosition(at.x, at.y) : undefined);
+    }
+
+    // Same action the ⌘K palette runs: renames the file and its title, and
+    // refreshes the assistant's CURRENT_MEETING.md pointer.
+    async function renameMeeting(meeting) {
+      const newTitle = await showInputModal({
+        title: 'Rename meeting',
+        label: 'Title',
+        value: meeting.title || '',
+        confirmText: 'Rename',
+      });
+      if (!newTitle || newTitle === meeting.title) return;
+      const result = await invoke('palette_execute', {
+        ui: { currentMeeting: meeting.path },
+        action: { id: 'rename-current-meeting', new_title: newTitle },
+      });
+      const newPath = result?.newPath || meeting.path;
+      const wasShowing = isDetailViewShowing(meeting.path);
+      loadMeetings();
+      if (wasShowing) await openMeetingDetail(newPath);
+      showActionToast(`Renamed to “${newTitle}”`);
+    }
+
+    async function archiveMeeting(meeting) {
+      const moves = await invoke('cmd_archive_meeting', { path: meeting.path });
+      if (isDetailViewShowing(meeting.path)) closeDetailView();
+      loadMeetings();
+      showActionToast(`Archived “${meeting.title || 'Untitled'}”`, {
+        undoLabel: 'Undo',
+        onUndo: async () => {
+          await invoke('cmd_restore_archived_meeting', { moves });
+          loadMeetings();
+          showActionToast(`Restored “${meeting.title || 'Untitled'}”`);
+        },
+      });
+    }
+
+    const detailMoreBtn = document.getElementById('btn-detail-more');
+    detailMoreBtn.addEventListener('click', async () => {
+      if (!currentMeetingPath) return;
+      const rect = detailMoreBtn.getBoundingClientRect();
+      detailMoreBtn.setAttribute('aria-expanded', 'true');
+      try {
+        await showMeetingActionsMenu(
+          { path: currentMeetingPath, title: currentMeetingDetail?.title },
+          { context: 'detail', at: { x: rect.left, y: rect.bottom + 6 } },
+        );
+      } catch (e) {
+        console.error('Meeting actions menu:', e);
+      } finally {
+        detailMoreBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // ── Action toast ──
+    // A short confirmation at the bottom of the window, with an optional Undo.
+    // ⌘Z also undoes while it is showing, unless focus is in a text field,
+    // which keeps its own undo.
+    const actionToast = document.getElementById('action-toast');
+    const actionToastText = document.getElementById('action-toast-text');
+    const actionToastUndo = document.getElementById('action-toast-undo');
+    const ACTION_TOAST_MS = 3200;
+    const ACTION_TOAST_UNDO_MS = 8000;
+    let actionToastTimer = null;
+    let actionToastUndoHandler = null;
+
+    function hideActionToast() {
+      clearTimeout(actionToastTimer);
+      actionToastTimer = null;
+      actionToastUndoHandler = null;
+      actionToast.classList.remove('is-visible');
+    }
+
+    function scheduleActionToastHide() {
+      clearTimeout(actionToastTimer);
+      actionToastTimer = setTimeout(hideActionToast, actionToastUndoHandler ? ACTION_TOAST_UNDO_MS : ACTION_TOAST_MS);
+    }
+
+    function showActionToast(message, { undoLabel, onUndo, tone } = {}) {
+      actionToastText.textContent = message;
+      actionToastUndoHandler = onUndo || null;
+      actionToastUndo.hidden = !onUndo;
+      actionToastUndo.textContent = undoLabel || 'Undo';
+      actionToast.classList.toggle('is-error', tone === 'error');
+      actionToast.classList.add('is-visible');
+      scheduleActionToastHide();
+    }
+
+    async function runActionToastUndo() {
+      const undo = actionToastUndoHandler;
+      if (!undo) return;
+      hideActionToast();
+      try {
+        await undo();
+      } catch (e) {
+        console.error('Undo:', e);
+        showActionToast(`Could not undo: ${e?.message || e}`, { tone: 'error' });
+      }
+    }
+
+    actionToastUndo.addEventListener('click', runActionToastUndo);
+    // Hovering holds the toast so a reach for Undo never races the timer.
+    actionToast.addEventListener('mouseenter', () => clearTimeout(actionToastTimer));
+    actionToast.addEventListener('mouseleave', () => {
+      if (actionToast.classList.contains('is-visible')) scheduleActionToastHide();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (!actionToastUndoHandler || !event.metaKey || event.shiftKey || event.key.toLowerCase() !== 'z') return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      event.preventDefault();
+      runActionToastUndo();
+    });
+
     readinessButton.addEventListener('click', () => {
       const scope = readinessButton.dataset.scope || 'all';
       if (scope === 'dictation' && desktopAppVersion) {
@@ -10633,6 +11031,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     });
 
+    // The typed note stays in the field; say why it was not saved.
+    function showNoteFailure(error) {
+      const message = String(error?.message || error || '');
+      showActionToast(
+        /no recording/i.test(message)
+          ? 'Note not saved: nothing is recording right now.'
+          : `Note not saved: ${message}`,
+        { tone: 'error' },
+      );
+    }
+
     async function saveInlineNote() {
       const text = noteInput.value.trim();
       if (!text) return;
@@ -10642,6 +11051,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         quickNote.classList.remove('active');
       } catch (e) {
         console.error('Note:', e);
+        showNoteFailure(e);
       }
     }
 
@@ -10696,26 +11106,36 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
-    function searchTerms(query) {
-      return [...new Set(
-        query
-          .trim()
-          .split(/\s+/)
-          .map(term => term.trim())
-          .filter(Boolean)
-      )];
+    // Mirrors the search contract (retrieval.rs): stopwords are optional and
+    // not marked, earlier terms match whole words, the final term (still being
+    // typed) matches word starts. Substring marking lit up the "a" in "Ryan".
+    const SEARCH_STOPWORDS = new Set([
+      'a', 'an', 'and', 'are', 'at', 'be', 'by', 'for', 'from', 'in', 'is', 'it', 'of', 'on', 'or',
+      'our', 'the', 'this', 'that', 'to', 'was', 'with', 'my', 'your',
+    ]);
+
+    function contentSearchTokens(query) {
+      const tokens = instantSearchTokens(query);
+      const last = tokens.length - 1;
+      const kept = tokens.filter((token, index) => index === last || !SEARCH_STOPWORDS.has(token));
+      return kept.every((token) => SEARCH_STOPWORDS.has(token)) ? tokens : kept;
     }
 
     function buildHighlightedFragment(text, query) {
       const fragment = document.createDocumentFragment();
-      const terms = searchTerms(query);
+      const tokens = contentSearchTokens(query);
+      const last = tokens.length - 1;
+      const patterns = tokens
+        .map((token, index) => (index === last && token.length >= 2
+          ? `${escapeRegex(token)}[\\p{L}\\p{N}]*`
+          : escapeRegex(token)));
 
-      if (!text || terms.length === 0) {
+      if (!text || patterns.length === 0) {
         fragment.appendChild(document.createTextNode(text || ''));
         return fragment;
       }
 
-      const regex = new RegExp(`(${terms.map(escapeRegex).join('|')})`, 'gi');
+      const regex = new RegExp(`(?<![\\p{L}\\p{N}])(?:${patterns.join('|')})(?![\\p{L}\\p{N}])`, 'giu');
       let lastIndex = 0;
 
       for (const match of text.matchAll(regex)) {
@@ -10741,6 +11161,22 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       element.replaceChildren(buildHighlightedFragment(text || '', query));
     }
 
+    // Same marking inside already-rendered (sanitized) markup: only text
+    // nodes change, so links and list structure survive.
+    function highlightTextNodes(root, query) {
+      if (!query) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {
+        if (!node.nodeValue.trim() || node.parentElement?.closest('mark')) continue;
+        const fragment = buildHighlightedFragment(node.nodeValue, query);
+        if (fragment.childNodes.length > 1 || fragment.firstChild?.nodeName === 'MARK') {
+          node.replaceWith(fragment);
+        }
+      }
+    }
+
     function isRememberableSpeakerName(name) {
       const key = String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
       if (!key || key === 'unknown' || key === 'unknown speaker') return false;
@@ -10748,7 +11184,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function closeDetailView() {
+      const wasOpen = detailOverlay.classList.contains('active');
       detailOverlay.classList.remove('active');
+      if (wasOpen && detailReturnFocusPath) {
+        const row = [...meetingsScroll.querySelectorAll('.meeting-item')]
+          .find((candidate) => candidate.dataset.path === detailReturnFocusPath);
+        row?.focus({ preventScroll: false });
+      }
+      detailReturnFocusPath = null;
       currentMeetingPath = null;
       currentMeetingDetail = null;
       persistRecallWorkspaceState({ currentMeetingPath: '' });
@@ -10851,13 +11294,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         clearTimeout(detailFeedbackTimer);
         detailFeedbackTimer = null;
       }
-      // Hold the card before the banner changes size — for EVERY message, not
-      // just the resummarize ones. The card is centred, so any banner that
-      // grows it moves the header (and the wrapping actions row, red Delete
-      // included) up under a resting pointer. Doing it here also means a
-      // banner shown by some other feature cannot leave the card grown and
-      // turn a later resummarize pin into a no-op. Idempotent, so the pin is
-      // taken once, at the pre-banner height.
+      // Hold the card before the banner changes size, for every message:
+      // see pinDetailCardHeight(). Idempotent, so the pin is taken once, at
+      // the pre-banner height.
       pinDetailCardHeight();
       detailFeedback.hidden = false;
       detailFeedback.className = `detail-feedback ${tone}`;
@@ -10956,15 +11395,30 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
         const aiList = document.createElement('div');
         aiList.className = 'detail-action-list';
-        for (const item of detail.action_items) {
+        detail.action_items.forEach((item, index) => {
           const row = document.createElement('div');
           row.className = 'detail-action-item';
           const isDone = (item.status || '').toLowerCase() === 'done';
-          const check = isDone ? '\u2611' : '\u2610';
           const due = item.due ? ` \u00b7 ${item.due}` : '';
-          const checkSpan = document.createElement('span');
+          // A real checkbox: writes the item's status (and its line in the
+          // body's checklist) back to the meeting file.
+          const checkSpan = document.createElement('input');
+          checkSpan.type = 'checkbox';
           checkSpan.className = 'detail-action-check';
-          checkSpan.textContent = check;
+          checkSpan.checked = isDone;
+          checkSpan.setAttribute('aria-label', `Done: ${item.task}`);
+          checkSpan.addEventListener('change', async () => {
+            const done = checkSpan.checked;
+            textSpan.style.textDecoration = done ? 'line-through' : '';
+            try {
+              await invoke('cmd_set_action_item_status', { path: detail.path, index, done });
+              item.status = done ? 'done' : 'open';
+            } catch (e) {
+              checkSpan.checked = !done;
+              textSpan.style.textDecoration = done ? '' : 'line-through';
+              showDetailFeedback(`Could not update the action item: ${e}`, 'error');
+            }
+          });
           const textSpan = document.createElement('span');
           textSpan.className = 'detail-action-text';
           setHighlightedText(textSpan, `${item.assignee}: ${item.task}${due}`, activeSearchQuery);
@@ -10972,7 +11426,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           row.appendChild(checkSpan);
           row.appendChild(textSpan);
           aiList.appendChild(row);
-        }
+        });
         aiCard.appendChild(aiList);
         detailScroll.appendChild(aiCard);
       }
@@ -11113,10 +11567,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           const btn = document.createElement('button');
           btn.className = 'detail-chip-btn';
           btn.textContent = person;
-          btn.addEventListener('click', () => {
-            searchInput.value = person;
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-          });
+          btn.addEventListener('click', () => searchFromDetail(person));
           peopleRow.appendChild(btn);
         }
         peopleCard.appendChild(peopleLabel);
@@ -11136,10 +11587,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           const btn = document.createElement('button');
           btn.className = 'detail-chip-btn';
           btn.textContent = topic;
-          btn.addEventListener('click', () => {
-            searchInput.value = topic;
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-          });
+          btn.addEventListener('click', () => searchFromDetail(topic));
           topicsRow.appendChild(btn);
         }
         topicsCard.appendChild(topicsLabel);
@@ -11212,7 +11660,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         artifactsCard.className = 'detail-context';
         const artifactsLabel = document.createElement('div');
         artifactsLabel.className = 'detail-context-label';
-        artifactsLabel.textContent = 'Adjacent Artifacts';
+        artifactsLabel.textContent = 'Drafts';
         const artifactsList = document.createElement('div');
         artifactsList.className = 'detail-action-list';
         for (const artifact of detail.adjacent_artifacts) {
@@ -11220,7 +11668,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           row.className = 'detail-action-item';
           const textSpan = document.createElement('span');
           textSpan.className = 'detail-action-text';
-          const review = artifact.review_available ? ' · review ready' : '';
+          const review = artifact.review_available ? ' · ready to review' : '';
           setHighlightedText(textSpan, `${artifact.filename} · ${artifact.kind}${review}`, activeSearchQuery);
           row.appendChild(textSpan);
 
@@ -11237,6 +11685,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
               });
             } catch (e) {
               console.error('Open adjacent artifact:', e);
+              showActionToast(`Could not open that draft: ${e?.message || e}`, { tone: 'error' });
             }
           });
           row.appendChild(openBtn);
@@ -11327,7 +11776,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
           const body = document.createElement('div');
           body.className = 'detail-section-body';
-          setHighlightedText(body, section.content || 'No content', activeSearchQuery);
+          if (/^transcript$/i.test(section.heading || '') || !section.content) {
+            setHighlightedText(body, section.content || 'No content', activeSearchQuery);
+          } else {
+            // Summary, decisions and notes are markdown; raw `- [ ]` and `**`
+            // read as noise. Same escaped, sanitized renderer as documents.
+            body.classList.add('md-prose');
+            // The sanitizer drops <input>, so task boxes become glyphs here
+            // rather than vanishing (and losing which items are done).
+            renderMarkdownToElement(body, section.content
+              .replace(/^(\s*[-*] )\[ \] /gm, '$1☐ ')
+              .replace(/^(\s*[-*] )\[[xX]\] /gm, '$1☑ '));
+            highlightTextNodes(body, activeSearchQuery);
+          }
 
           sectionEl.appendChild(heading);
           sectionEl.appendChild(body);
@@ -11353,6 +11814,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       detailOverlay.classList.add('active');
       persistRecallWorkspaceState({ currentMeetingPath: detail.path });
+      scrollDetailToFirstMatch();
+    }
+
+    // Opened from a search: land on the first match in the meeting's text
+    // (not the title or chips), so a hit deep in a transcript is visible.
+    function scrollDetailToFirstMatch() {
+      if (!activeSearchQuery) return;
+      const first = detailScroll.querySelector('.detail-section-body mark');
+      if (!first) return;
+      first.classList.add('mark-current');
+      requestAnimationFrame(() => first.scrollIntoView({ block: 'center' }));
     }
 
     // Returns how the open ended, so a caller that wants to touch the view
@@ -11368,18 +11840,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // finished run attach its report to whichever meeting the user has since
       // opened. Same request-sequence idiom as refreshResummarizeButton().
       const requestId = ++detailOpenRequestId;
-      // Feedback belongs to the meeting that produced it. The detail view can
-      // be navigated without ever closing — the "Source" button on a commitment
-      // and "Open" on a related meeting both call straight back into here — and
-      // the resummarize report has no auto-hide timer, so without this the next
-      // meeting renders under the previous one's backup filename and merge
-      // notes.
-      // The one entry allowed to keep its banner is a refresh of the meeting
-      // already on screen, which is what the resummarize completion path does.
-      // Note this is deliberately NOT a bare path comparison: currentMeetingPath
-      // outlives the overlay (Recall reassigns it while the view is closed), so
-      // a path match alone would let a reopen inherit a banner that was never
-      // pinned against this content.
+      // Feedback belongs to the meeting that produced it: Source and Open
+      // navigate without closing the view, and the resummarize report never
+      // auto-hides. Only a refresh of the meeting already on screen keeps its
+      // banner. Not a bare path comparison: currentMeetingPath outlives the
+      // overlay (Recall reassigns it while the view is closed).
       if (!isDetailViewShowing(path)) {
         clearDetailFeedback();
       }
@@ -11390,12 +11855,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // in flight) shows a stale, wrongly-sized control.
       resetResummarizeButton();
       try {
-        const detail = await invoke('cmd_get_meeting_detail', { path });
+        // The meeting itself first; related context costs several corpus
+        // passes, so it fills in afterwards (loadRelatedForDetail).
+        const detail = await invoke('cmd_get_meeting_detail', { path, includeRelated: false });
         // A newer open superseded this one while the fetch was in flight.
         // Rendering now would put the older meeting back on screen.
         if (requestId !== detailOpenRequestId) return 'superseded';
         renderDetailSections(detail);
         refreshResummarizeButton();
+        loadRelatedForDetail(path, requestId);
         return 'rendered';
       } catch (e) {
         console.error('Detail:', e);
@@ -11407,8 +11875,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // outcome is still reported honestly as 'failed'.
         try {
           await invoke('cmd_open_file', { path });
+          showActionToast('Minutes could not show this meeting, so it opened in your editor.', { tone: 'error' });
         } catch (openError) {
           console.error('Detail fallback open:', openError);
+          showActionToast(`Could not open this meeting: ${e?.message || e}`, { tone: 'error' });
         }
         // Re-check after that await too. A newer open can render fresh content
         // while the external editor is being launched; reporting 'failed' then
@@ -11585,9 +12055,16 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       meetingsScroll.replaceChildren();
-      appendProactiveContextCard();
+      const sameList = meetingRowsState !== null && meetingRowsState.query === activeSearchQuery;
+      meetingRowsState = null;
 
       if (!meetings || meetings.length === 0) {
+        // No matches is not "no meetings": the first-run screen here hid the
+        // record controls and read like a reset app.
+        if (activeSearchQuery) {
+          renderNoSearchResults(activeSearchQuery);
+          return;
+        }
         footer.classList.add('footer-hidden');
         renderSetupEmptyState();
         return;
@@ -11595,77 +12072,174 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       footer.classList.remove('footer-hidden');
 
-      const groups = groupByDate(meetings);
-      for (const [label, items] of Object.entries(groups)) {
-        const header = document.createElement('div');
-        header.className = 'date-group';
-        header.textContent = label;
-        meetingsScroll.appendChild(header);
+      // Rows are built in chunks as the list scrolls; a refresh of the same
+      // list keeps at least as many rows as were showing (scroll position).
+      meetingRowsState = {
+        query: activeSearchQuery,
+        rows: Object.entries(groupByDate(meetings)).flatMap(([label, items]) =>
+          items.map((m) => ({ label, m }))),
+        rendered: 0,
+        lastLabel: null,
+      };
+      appendMeetingRows(Math.max(MEETING_ROWS_CHUNK, sameList ? previousRendered : 0));
+    }
 
-        for (const m of items) {
-          const item = document.createElement('div');
-          item.className = 'meeting-item';
-          item.addEventListener('click', () => {
-            openMeetingDetail(m.path);
-          });
-
-          const info = document.createElement('div');
-          info.className = 'meeting-info';
-
-          const title = document.createElement('div');
-          title.className = 'meeting-title';
-          setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
-
-          const meta = document.createElement('div');
-          meta.className = 'meeting-meta';
-          meta.textContent = formatTime(m.date);
-
-          info.appendChild(title);
-          info.appendChild(meta);
-
-          if (activeSearchQuery && m.snippet) {
-            const snippet = document.createElement('div');
-            snippet.className = 'meeting-snippet';
-            setHighlightedText(snippet, m.snippet, activeSearchQuery);
-            info.appendChild(snippet);
-          }
-
-          // Lifecycle badges (prepped / recorded / debriefed)
-          if (m.badges && m.badges.length > 0) {
-            const badgeRow = document.createElement('div');
-            badgeRow.className = 'meeting-badges';
-            for (const b of m.badges) {
-              const lb = document.createElement('span');
-              lb.className = 'lifecycle-badge ' + b;
-              lb.textContent = b;
-              lb.setAttribute('aria-label', b);
-              badgeRow.appendChild(lb);
-            }
-            info.appendChild(badgeRow);
-          }
-
-          const badge = document.createElement('span');
-          const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
-          badge.className = 'meeting-badge' + typeClass;
-          badge.textContent = m.content_type || 'meeting';
-
-          const chatBtn = document.createElement('button');
-          chatBtn.className = 'meeting-chat-btn';
-          chatBtn.setAttribute('aria-label', 'Discuss with Agent');
-          chatBtn.setAttribute('title', 'Discuss with Agent');
-          chatBtn.textContent = '\u279C';
-          chatBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            await openRecall('meeting', m.path);
-            setRecallPhase('debrief', m.title || 'Meeting');
-          });
-
-          item.appendChild(info);
-          item.appendChild(chatBtn);
-          item.appendChild(badge);
-          meetingsScroll.appendChild(item);
+    function appendMeetingRows(count) {
+      const state = meetingRowsState;
+      if (!state) return;
+      const end = Math.min(state.rows.length, state.rendered + count);
+      meetingsScroll.querySelector('.meeting-list-end')?.remove();
+      for (let index = state.rendered; index < end; index += 1) {
+        const { label, m } = state.rows[index];
+        if (label !== state.lastLabel) {
+          const header = document.createElement('div');
+          header.className = 'date-group';
+          header.textContent = label;
+          meetingsScroll.appendChild(header);
+          state.lastLabel = label;
         }
+        meetingsScroll.appendChild(buildMeetingRow(m));
       }
+      state.rendered = end;
+      previousRendered = end;
+      if (end === state.rows.length && !state.query) {
+        const listEnd = document.createElement('div');
+        listEnd.className = 'meeting-list-end';
+        listEnd.textContent = `${state.rows.length.toLocaleString('en-US')} ${state.rows.length === 1 ? 'meeting' : 'meetings'}`;
+        meetingsScroll.appendChild(listEnd);
+      }
+    }
+
+    function focusMeetingRow(from, step) {
+      const rows = [...meetingsScroll.querySelectorAll('.meeting-item')];
+      if (!rows.length) return false;
+      const index = from ? rows.indexOf(from) : -1;
+      const next = rows[index + step];
+      if (next) {
+        next.focus();
+        next.scrollIntoView({ block: 'nearest' });
+        return true;
+      }
+      if (step < 0 && index === 0) {
+        searchInput.focus();
+        return true;
+      }
+      return false;
+    }
+
+    meetingsScroll.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const row = event.target.closest?.('.meeting-item');
+      if (!row) return;
+      event.preventDefault();
+      focusMeetingRow(row, event.key === 'ArrowDown' ? 1 : -1);
+    });
+
+    searchInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' || event.isComposing) return;
+      if (focusMeetingRow(null, 1)) event.preventDefault();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'f') return;
+      if (document.activeElement?.closest?.('.recall-terminal') || isOverlayActive() || mdViewer.classList.contains('active')) return;
+      event.preventDefault();
+      if (detailOverlay.classList.contains('active')) closeDetailView();
+      if (document.body.classList.contains('sidebar-collapsed')) document.getElementById('btn-sidebar-expand')?.click();
+      searchInput.focus();
+      searchInput.select();
+    });
+
+    meetingsScroll.addEventListener('scroll', () => {
+      const state = meetingRowsState;
+      if (!state || documentsViewActive || state.rendered >= state.rows.length) return;
+      if (meetingsScroll.scrollTop + meetingsScroll.clientHeight > meetingsScroll.scrollHeight - 600) {
+        appendMeetingRows(MEETING_ROWS_CHUNK);
+      }
+    }, { passive: true });
+
+    function buildMeetingRow(m) {
+      const item = document.createElement('div');
+      item.className = 'meeting-item';
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.dataset.path = m.path;
+      item.addEventListener('click', () => {
+        detailReturnFocusPath = m.path;
+        openMeetingDetail(m.path);
+      });
+      item.addEventListener('keydown', (event) => {
+        if (event.target !== item || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        item.click();
+      });
+      item.addEventListener('contextmenu', async (event) => {
+        event.preventDefault();
+        item.classList.add('is-menu-target');
+        try {
+          await showMeetingActionsMenu(m, { context: 'sidebar' });
+        } catch (e) {
+          console.error('Meeting actions menu:', e);
+        } finally {
+          item.classList.remove('is-menu-target');
+        }
+      });
+
+      const info = document.createElement('div');
+      info.className = 'meeting-info';
+
+      const title = document.createElement('div');
+      title.className = 'meeting-title';
+      setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
+
+      const meta = document.createElement('div');
+      meta.className = 'meeting-meta';
+      // Section headers replace date headers in search-by-meaning results.
+      meta.textContent = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
+
+      info.appendChild(title);
+      info.appendChild(meta);
+
+      if (activeSearchQuery && m.snippet) {
+        const snippet = document.createElement('div');
+        snippet.className = 'meeting-snippet';
+        setHighlightedText(snippet, m.snippet, activeSearchQuery);
+        info.appendChild(snippet);
+      }
+
+      // Lifecycle badges (prepped / recorded / debriefed)
+      if (m.badges && m.badges.length > 0) {
+        const badgeRow = document.createElement('div');
+        badgeRow.className = 'meeting-badges';
+        for (const b of m.badges) {
+          const lb = document.createElement('span');
+          lb.className = 'lifecycle-badge ' + b;
+          lb.textContent = b;
+          lb.setAttribute('aria-label', b);
+          badgeRow.appendChild(lb);
+        }
+        info.appendChild(badgeRow);
+      }
+
+      const badge = document.createElement('span');
+      const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
+      badge.className = 'meeting-badge' + typeClass;
+      badge.textContent = m.content_type || 'meeting';
+
+      const chatBtn = document.createElement('button');
+      chatBtn.className = 'meeting-chat-btn';
+      chatBtn.setAttribute('aria-label', 'Discuss with Agent');
+      chatBtn.setAttribute('title', 'Discuss with Agent');
+      chatBtn.textContent = '\u279C';
+      chatBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await discussMeetingWithAgent(m.path, m.title);
+      });
+
+      item.appendChild(info);
+      item.appendChild(chatBtn);
+      item.appendChild(badge);
+      return item;
     }
 
     let meetingInventoryGeneration = 0;
@@ -11735,6 +12309,34 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         (message.includes('capacity') || message.includes('already active'));
     }
 
+    // One meeting-list scan at a time, shared by every caller. The backend is
+    // single-flight anyway; before this, a UI deadline or an overlapping
+    // refresh discarded the running scan's result and then started another
+    // full scan once it finished. A caller that wants data newer than the
+    // running scan (a file just changed) gets that scan's result and one
+    // queued follow-up refresh.
+    let meetingInventoryInFlight = null;
+    let meetingInventoryRefreshQueued = false;
+    // The whole corpus, not the newest 30: listing is metadata-only (~0.1 s
+    // for 1,100 meetings), older meetings were reachable only by search, and
+    // the instant title filter can only match titles it has.
+    const MEETING_INVENTORY_LIMIT = 5000;
+
+    function requestMeetingInventory({ fresh = true } = {}) {
+      if (meetingInventoryInFlight) {
+        if (fresh) meetingInventoryRefreshQueued = true;
+        return meetingInventoryInFlight;
+      }
+      meetingInventoryInFlight = invoke('cmd_list_meetings', { limit: MEETING_INVENTORY_LIMIT }).finally(() => {
+        meetingInventoryInFlight = null;
+        if (meetingInventoryRefreshQueued) {
+          meetingInventoryRefreshQueued = false;
+          scheduleMeetingInventoryRetry();
+        }
+      });
+      return meetingInventoryInFlight;
+    }
+
     function scheduleMeetingInventoryRetry() {
       if (meetingInventoryRetryTimer) return;
       meetingInventoryRetryTimer = setTimeout(() => {
@@ -11758,18 +12360,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
                 setMeetingInventoryWaitingOnBusy(true);
               }
             })
-          : await withUiDeadline(
-              invoke('cmd_list_meetings', { limit: 30 }),
-              'Meeting inventory'
-            );
+          : await withUiDeadline(requestMeetingInventory(), 'Meeting inventory');
         if (generation !== meetingInventoryGeneration) return;
         const nextFingerprint = fingerprintMeetingInventory(meetings);
-        if (meetingInventoryFingerprint !== null && meetingInventoryFingerprint !== nextFingerprint) {
-          invalidateProactiveContextBundle();
-        }
         meetingInventoryFingerprint = nextFingerprint;
         finishMeetingInventoryLoading();
         setSearchError(null);
+        lastMeetingInventory = meetings;
         renderMeetings(meetings);
       } catch (e) {
         if (generation !== meetingInventoryGeneration) return;
@@ -11782,21 +12379,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           return;
         }
         if (options.patient !== true && !inventoryPatientRetryActive) {
-          // First failure of an automatic load. The scan itself is fast (~2s on
-          // an 825-file library); what pushes it past the five-second deadline
-          // is contention with the rest of app startup. Nothing else
-          // re-triggers this, so without an automatic second attempt the user is
-          // stranded on the error state until an unrelated event happens to fire
-          // -- which is how a transient startup hiccup ends up looking like lost
-          // data. Show the honest state, then quietly try once more, patiently.
-          // Exactly one auto-attempt: the patient path awaits the real result,
-          // so if it fails too, something is genuinely wrong and retrying in a
-          // loop would only burn the corpus repeatedly.
-          //
-          // Nothing scary is shown yet: flashing "Couldn't read your meetings"
-          // for the two seconds before the retry lands would be alarming about
-          // something we are already fixing. If the retry also fails it renders
-          // the error state itself, which is when saying so is earned.
+          // First failure of an automatic load, usually startup contention
+          // pushing the scan past its deadline. Nothing else re-triggers it, so
+          // retry once, patiently, without showing an error first; the patient
+          // path renders the error itself if it fails too. One retry only: a
+          // loop would rescan the whole corpus repeatedly.
           retryInventoryPatiently(null);
           return;
         }
@@ -11814,27 +12401,56 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         renderInventoryUnavailableState();
         return;
       }
-      // The proactive context bundle runs several corpus-wide scans and is only
-      // needed for the ambient-context card, not the meetings list itself. Load
-      // it in the background and re-render once it resolves, so first paint is
-      // never gated on it. (It was previously awaited *before* the list — the
-      // dominant cause of the blank window at startup.)
-      loadProactiveContextBundle()
-        .then(() => {
-          if (!documentsViewActive && generation === meetingInventoryGeneration) {
-            renderMeetings(meetings);
-          }
-        })
-        .catch((e) => console.error('Proactive bundle:', e));
     }
 
+    // A chip search fills the sidebar, which the full-window detail overlay
+    // covers; close it (and leave Documents) so the results are visible.
+    function searchFromDetail(term) {
+      closeDetailView();
+      if (documentsViewActive) setDocumentsView(false);
+      if (document.body.classList.contains('sidebar-collapsed')) {
+        document.getElementById('btn-sidebar-expand')?.click();
+      }
+      searchInput.value = term;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    const RELATED_DETAIL_FIELDS = ['related_meetings', 'related_commitments', 'adjacent_artifacts'];
+
+    function renderDetailKeepingScroll(detail) {
+      const scrollTop = detailScroll.scrollTop;
+      renderDetailSections(detail);
+      detailScroll.scrollTop = scrollTop;
+    }
+
+    // Cross-meeting context for the open meeting, fetched after it renders.
+    // Waits for a meeting-list scan already in flight: both need the
+    // single-flight corpus lease, and the list is what the user is waiting on.
+    async function loadRelatedForDetail(path, requestId) {
+      try {
+        if (meetingInventoryInFlight) await meetingInventoryInFlight.catch(() => {});
+        if (requestId !== detailOpenRequestId || !isDetailViewShowing(path)) return;
+        const full = await invoke('cmd_get_meeting_detail', { path, includeRelated: true });
+        if (requestId !== detailOpenRequestId || !isDetailViewShowing(path)) return;
+        const merged = { ...currentMeetingDetail };
+        for (const field of RELATED_DETAIL_FIELDS) merged[field] = full[field];
+        renderDetailKeepingScroll(merged);
+      } catch (e) {
+        console.error('Related context:', e);
+      }
+    }
+
+    // Re-render the open meeting (e.g. to re-highlight a new search) without
+    // recomputing related context it already has.
     async function refreshOpenMeetingDetail() {
       if (!currentMeetingDetail || !detailOverlay.classList.contains('active')) return;
       const path = currentMeetingDetail.path;
       if (!path) return;
       try {
-        const detail = await invoke('cmd_get_meeting_detail', { path });
-        renderDetailSections(detail);
+        const detail = await invoke('cmd_get_meeting_detail', { path, includeRelated: false });
+        if (!isDetailViewShowing(path)) return;
+        for (const field of RELATED_DETAIL_FIELDS) detail[field] = currentMeetingDetail[field];
+        renderDetailKeepingScroll(detail);
       } catch (e) {
         console.error('Detail refresh:', e);
         renderDetailSections(currentMeetingDetail);
@@ -11852,6 +12468,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           const results = await invoke('cmd_search', { query: activeSearchQuery });
           setSearchError(null);
           renderMeetings(results);
+          addRelatedByMeaning(activeSearchQuery, searchRequestId, results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           console.error('Search refresh:', e);
@@ -11883,22 +12500,26 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let searchTimeout;
     let searchRequestId = 0;
     documentsToggle.addEventListener('click', () => setDocumentsView(!documentsViewActive));
-    searchInput.addEventListener('input', (e) => {
-      if (documentsViewActive) return;
-      clearTimeout(searchTimeout);
-      const query = e.target.value.trim();
-      activeSearchQuery = query;
-      const reqId = ++searchRequestId;
-      if (!query) {
-        scheduleMeetingsRefresh(0);
+    // Each backend search reads the whole corpus and searches run one at a
+    // time behind a single lease, so firing one per keystroke queued them:
+    // typing a short word took 20+ seconds to show anything. Wait for a pause,
+    // keep one search in flight, and when it lands run only the latest query.
+    let searchInFlight = false;
+    let searchQueued = null;
+
+    function runLatestSearch(query, reqId) {
+      if (searchInFlight) {
+        searchQueued = { query, reqId };
         return;
       }
-      searchTimeout = setTimeout(async () => {
+      searchInFlight = true;
+      (async () => {
         try {
           const results = await invoke('cmd_search', { query });
-          if (reqId !== searchRequestId) return; // stale response, newer one in flight
+          if (reqId !== searchRequestId) return; // a newer query superseded this one
           setSearchError(null);
           renderMeetings(results);
+          addRelatedByMeaning(query, reqId, results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           if (reqId !== searchRequestId) return;
@@ -11912,8 +12533,179 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             return;
           }
           setSearchError(e);
+        } finally {
+          searchInFlight = false;
+          const next = searchQueued;
+          searchQueued = null;
+          if (next && next.reqId === searchRequestId) runLatestSearch(next.query, next.reqId);
         }
-      }, 80);
+      })();
+    }
+
+    // Search by meaning. When it finds meetings for a query of two or more
+    // words, the results are re-laid out as three sections: meetings whose
+    // titles contain the words, then the semantic hits (pulled up from
+    // wherever the word search ranked them), then everything else the word
+    // search matched. Appending semantic hits below the word results buried
+    // the right answer under loose single-word matches ("team", "getting").
+    // Single words, and searches with the setting off, keep the date-grouped
+    // list.
+    let semanticSearchEnabled = false;
+
+    async function addRelatedByMeaning(query, reqId, lexical) {
+      if (!semanticSearchEnabled || instantSearchTokens(query).length < 2) return;
+      let hits;
+      try {
+        hits = await invoke('cmd_semantic_search', { query });
+      } catch (e) {
+        console.error('Semantic search:', e);
+        return;
+      }
+      if (reqId !== searchRequestId || activeSearchQuery !== query || documentsViewActive) return;
+      const words = contentSearchTokens(query);
+      const titleMatches = (lexical || []).filter((m) => instantTitleTier(m.title, words) > 0);
+      const inTitles = new Set(titleMatches.map((m) => m.path));
+      const related = hits
+        .filter((hit) => !inTitles.has(hit.path))
+        .map((hit) => ({
+          path: hit.path,
+          title: hit.title,
+          date: hit.date,
+          content_type: hit.contentType,
+          snippet: hit.snippet,
+        }));
+      if (!related.length) return;
+      const inRelated = new Set(related.map((m) => m.path));
+      const others = (lexical || []).filter((m) => !inTitles.has(m.path) && !inRelated.has(m.path));
+      meetingsScroll.replaceChildren();
+      footer.classList.remove('footer-hidden');
+      meetingRowsState = {
+        query: activeSearchQuery,
+        sections: true,
+        rows: [
+          ...titleMatches.map((m) => ({ label: 'Title matches', m })),
+          ...related.map((m) => ({ label: 'Related by meaning', m })),
+          ...others.map((m) => ({ label: 'Other mentions', m })),
+        ],
+        rendered: 0,
+        lastLabel: null,
+      };
+      appendMeetingRows(MEETING_ROWS_CHUNK);
+    }
+
+    function formatSearchRowDate(dateStr) {
+      if (!dateStr) return '';
+      try {
+        return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      } catch { return ''; }
+    }
+
+    let semanticStatusTimer = null;
+
+    function describeSemanticStatus(status) {
+      if (!status.enabled) return '';
+      if (status.phase === 'downloading') return 'Downloading the model…';
+      if (status.phase === 'indexing') {
+        return status.total
+          ? `Indexing meetings… ${status.done.toLocaleString('en-US')} of ${status.total.toLocaleString('en-US')}`
+          : 'Indexing meetings…';
+      }
+      if (status.phase === 'error') return `Indexing stopped: ${status.error || 'unknown error'}`;
+      return `${status.indexedMeetings.toLocaleString('en-US')} meetings indexed.`;
+    }
+
+    function applySemanticStatus(status) {
+      semanticSearchEnabled = status.enabled && status.modelInstalled;
+      setSettingsToggle('settings-semantic-search', status.enabled);
+      const toggle = document.getElementById('settings-semantic-search');
+      toggle.disabled = !status.workerAvailable && !status.enabled;
+      const line = document.getElementById('settings-semantic-status');
+      line.textContent = status.workerAvailable || status.enabled
+        ? describeSemanticStatus(status)
+        : 'Not available in this build of Minutes.';
+      line.hidden = !line.textContent;
+      clearTimeout(semanticStatusTimer);
+      if (status.enabled && (status.phase === 'downloading' || status.phase === 'indexing')) {
+        semanticStatusTimer = setTimeout(refreshSemanticStatus, 2000);
+      }
+    }
+
+    async function refreshSemanticStatus() {
+      try {
+        applySemanticStatus(await invoke('cmd_semantic_status'));
+      } catch (e) {
+        console.error('Semantic status:', e);
+      }
+    }
+
+    document.getElementById('settings-semantic-search').addEventListener('click', async () => {
+      const toggle = document.getElementById('settings-semantic-search');
+      const next = toggle.textContent.trim() !== 'On';
+      toggle.disabled = true;
+      try {
+        applySemanticStatus(await invoke('cmd_semantic_set_enabled', { enabled: next }));
+      } catch (e) {
+        toggle.disabled = false;
+        showActionToast(`Could not change search by meaning: ${e}`, { tone: 'error' });
+      }
+    });
+
+    refreshSemanticStatus();
+
+    // Instant title matches from the meetings already loaded, ranked the way
+    // the backend tiers them (exact phrase, then every word), so the list
+    // responds on the first keystroke and the full-text results that replace
+    // it keep the same title hits on top. (lastMeetingInventory is declared
+    // with the other list state, above loadMeetings.)
+
+    function instantSearchTokens(value) {
+      return (value || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    }
+
+    function instantTitleTier(title, wanted) {
+      const tokens = instantSearchTokens(title);
+      const last = wanted.length - 1;
+      const matches = (token, index) => (index === last && wanted[index].length >= 2
+        ? token.startsWith(wanted[index])
+        : token === wanted[index]);
+      for (let start = 0; start + wanted.length <= tokens.length; start += 1) {
+        if (wanted.every((_, index) => matches(tokens[start + index], index))) return 2;
+      }
+      return wanted.every((_, index) => tokens.some((token) => matches(token, index))) ? 1 : 0;
+    }
+
+    function renderInstantTitleMatches(query) {
+      const wanted = contentSearchTokens(query);
+      if (!wanted.length) return;
+      const hits = lastMeetingInventory
+        .map((meeting) => ({ meeting, tier: instantTitleTier(meeting.title, wanted) }))
+        .filter((hit) => hit.tier > 0)
+        .sort((a, b) => b.tier - a.tier)
+        .map((hit) => hit.meeting);
+      if (hits.length) renderMeetings(hits);
+      else meetingsScroll.replaceChildren();
+      const pending = document.createElement('div');
+      pending.className = 'empty-state search-pending';
+      const copy = document.createElement('div');
+      copy.className = 'sub';
+      copy.textContent = 'Searching all meetings…';
+      pending.append(copy);
+      meetingsScroll.append(pending);
+    }
+
+    searchInput.addEventListener('input', (e) => {
+      if (documentsViewActive) return;
+      clearTimeout(searchTimeout);
+      const query = e.target.value.trim();
+      activeSearchQuery = query;
+      const reqId = ++searchRequestId;
+      if (!query) {
+        searchQueued = null;
+        scheduleMeetingsRefresh(0);
+        return;
+      }
+      renderInstantTitleMatches(query);
+      searchTimeout = setTimeout(() => runLatestSearch(query, reqId), 250);
     });
 
     // ── Search error banner ──
@@ -11948,8 +12740,38 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
+    async function installOnboardingModels(model) {
+      // Read only model readiness/preferences; full Settings also probes
+      // providers and must not delay or block first-run installation.
+      const setup = await invoke('cmd_needs_setup');
+      const selections = setup.modelSelections;
+      if (!selections || typeof selections.dictation !== 'string' || typeof selections.standaloneLive !== 'string') {
+        throw new Error('Could not read your saved speech model choices. Try setup again.');
+      }
+      // Batch, Live and dictation are separate choices. Install the existing
+      // companion selections rather than making all three use the batch model.
+      const models = new Set([model]);
+      const dictationModel = selections.dictation;
+      const liveModel = selections.standaloneLive || dictationModel;
+      for (const companion of [dictationModel, liveModel]) {
+        if (['tiny', 'base', 'small', 'medium', 'large-v3'].includes(companion)) {
+          models.add(companion);
+        }
+      }
+      for (const selected of models) {
+        await invoke('cmd_download_model', { model: selected });
+      }
+      // An explicit onboarding choice selects only the batch model, and only
+      // after installation succeeds. Failures leave all selections untouched.
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: model });
+      return invoke('cmd_needs_setup');
+    }
+
     function setupOnboarding(root) {
       applyActivationState(root, currentSetup?.activation || activationState);
+      root.querySelector('#onboarding-meeting-audio-source').addEventListener('change', (event) => {
+        recordingAudioChoice.save(event.target.value);
+      });
 
       root.querySelectorAll('.model-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -11971,40 +12793,20 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           }, 500);
 
           try {
-            const result = await invoke('cmd_download_model', { model });
+            const setup = await installOnboardingModels(model);
             clearInterval(progressTimer);
             fill.style.width = '100%';
-            text.textContent = result;
+            text.textContent = setup.needsSetup
+              ? 'Meeting model installed. Another selected speech model still needs setup in Settings.'
+              : 'Speech models ready. Live and dictation keep their own selections.';
 
-            // Persist the chosen model to ALL whisper-backed surfaces:
-            // transcription (batch + recording pipeline) AND dictation.
-            // live_transcript.model defaults to empty which falls back to
-            // dictation.model per the comment in config.rs, so updating
-            // dictation propagates transitively.
-            //
-            // Before this, cmd_download_model only put the file on disk;
-            // a user picking "tiny" in onboarding would still have
-            // transcription.model="small" (default) and dictation.model=
-            // "base" (default) and Minutes would try to use models that
-            // were not downloaded. allaire surfaced the dictation half
-            // of this in the v0.17.0 ship feedback.
-            try {
-              await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: model });
-            } catch (settingErr) {
-              console.warn('onboarding: failed to persist transcription.model:', settingErr);
-            }
-            try {
-              await invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: model });
-            } catch (settingErr) {
-              console.warn('onboarding: failed to persist dictation.model:', settingErr);
-            }
+            root.querySelector('#step-model').classList.toggle('done', !setup.needsSetup);
+            root.querySelector('#step-model-status').textContent = setup.needsSetup ? 'More setup needed' : 'Done';
+            root.querySelector('#step-model-body').classList.toggle('ui-hidden', !setup.needsSetup);
+            if (setup.needsSetup) root.querySelectorAll('.model-btn').forEach(b => b.disabled = false);
 
-            root.querySelector('#step-model').classList.add('done');
-            root.querySelector('#step-model-status').textContent = 'Done';
-            root.querySelector('#step-model-body').classList.add('ui-hidden');
-
-            currentSetup = { ...currentSetup, hasModel: true, needsSetup: false };
-            activationState = { ...(activationState || {}), ...(currentSetup?.activation || {}), hasModel: true };
+            currentSetup = setup;
+            activationState = currentSetup.activation || activationState;
             applyActivationState(root, currentSetup?.activation || activationState);
           } catch (e) {
             clearInterval(progressTimer);
@@ -12020,7 +12822,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         try {
           setFooterCaptureMode(true, 'starting');
           startFastPoll();
-          await startDesktopRecordingWithArgs();
+          await startDesktopRecordingFromUi();
         } catch (e) {
           console.error('First recording:', e);
           showRecordingStartError(e);
@@ -12038,7 +12840,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function renderInventoryUnavailableState() {
       if (documentsViewActive) return;
       meetingsScroll.replaceChildren();
-      appendProactiveContextCard();
       footer.classList.remove('footer-hidden');
       const failed = document.createElement('div');
       failed.className = 'empty-state';
@@ -12060,16 +12861,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // fresh failure and offer a competing button.
     let inventoryPatientRetryActive = false;
 
-    // An explicit Try again must be able to succeed where the automatic load
-    // could not. loadMeetings() bounds its wait at five seconds so first paint
-    // stays quick, but that is the very deadline a large library trips, and the
-    // abandoned scan is never replayed by the backend -- so calling it again
-    // unchanged would time out identically and the button would be decorative
-    // for exactly the people who see it.
-    //
-    // So the retry runs THROUGH loadMeetings (inheriting its generation check,
-    // fingerprint comparison, proactive-context invalidation and Documents
-    // guard) and only swaps in a patient wait.
+    // Try again must be able to succeed where the automatic load could not:
+    // loadMeetings() gives up after five seconds, which is the deadline a large
+    // library trips, and the backend never replays an abandoned scan. So the
+    // retry runs through loadMeetings (keeping its generation check,
+    // fingerprint comparison and Documents guard) with a patient wait.
     async function retryInventoryPatiently(button) {
       const originalLabel = button ? button.textContent : '';
       if (button) {
@@ -12098,7 +12894,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const deadline = Date.now() + budgetMs;
       while (true) {
         try {
-          return await invoke('cmd_list_meetings', { limit: 30 });
+          // Joins a scan already in flight rather than starting another.
+          return await requestMeetingInventory({ fresh: false });
         } catch (e) {
           const busy = String((e && e.message) || e || '').toLowerCase()
             .includes('still checking');
@@ -12109,14 +12906,36 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
+    function renderNoSearchResults(query) {
+      footer.classList.remove('footer-hidden');
+      const empty = document.createElement('div');
+      empty.className = 'empty-state';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = 'No meetings match';
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = `“${query}”`;
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'btn btn-secondary btn-sm empty-state-action';
+      clear.textContent = 'Clear search';
+      clear.addEventListener('click', () => {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input'));
+        searchInput.focus();
+      });
+      empty.append(title, sub, clear);
+      meetingsScroll.replaceChildren(empty);
+    }
+
     function renderSetupEmptyState() {
       const standaloneLiveNote = renderStandaloneLiveNote(currentSetup);
       const modelStepBody = `
-                <p>Choose a model size:</p>
+                <p>Choose a meeting model. Live and dictation keep their own models (Base by default).</p>
                 <div class="model-options">
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
-                  <button class="btn btn-primary btn-sm model-btn" data-model="base">Base (141 MB, recommended)</button>
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="small">Small (466 MB, best accuracy)</button>
+                  <button class="btn btn-primary btn-sm model-btn" data-model="small">Small (466 MB, recommended)</button>
+                  <button class="btn btn-secondary btn-sm model-btn" data-model="base">Base (142 MB, lower resource use)</button>
                 </div>
                 <div class="download-progress ui-hidden">
                   <div class="progress-bar"><div class="progress-fill"></div></div>
@@ -12143,12 +12962,21 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="onboarding-step disabled" id="step-first-artifact">
               <div class="step-header">
                 <span class="step-num">2</span>
-                <span class="step-title">Create your first artifact</span>
+                <span class="step-title">Make your first recording</span>
                 <span class="step-status" id="step-first-artifact-status"></span>
               </div>
               <div class="step-body">
                 <p>Make a quick 10-second test recording. Say one sentence, stop, and let Minutes save its first markdown artifact.</p>
-                <button class="btn btn-primary" id="btn-start-first-recording">Record a 10-second test</button>
+                <div class="footer-device-picker onboarding-audio-choice">
+                  <label class="footer-device-label" for="onboarding-meeting-audio-source">Meeting audio</label>
+                  <select id="onboarding-meeting-audio-source" class="device-picker" aria-describedby="onboarding-meeting-audio-help">
+                    <option value="" disabled selected>Choose audio to record</option>
+                    <option value="microphone-and-system">Microphone + system audio</option>
+                    <option value="microphone">Microphone only</option>
+                  </select>
+                  <p id="onboarding-meeting-audio-help" class="recording-audio-help" aria-live="polite">Choose the audio for your meeting.</p>
+                </div>
+                <button class="btn btn-primary" id="btn-start-first-recording" disabled>Record a 10-second test</button>
               </div>
             </div>
             <div class="onboarding-step disabled" id="step-watch-artifact">
@@ -12169,6 +12997,78 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── Upcoming meetings ──
+    // "Not a meeting" hides one occurrence (remembered locally until it has
+    // started); the menu's other choices write the [calendar] filters.
+    const DISMISSED_UPCOMING_KEY = 'minutes.dismissedUpcoming';
+
+    function upcomingKey(event) {
+      return `${event.title}|${event.start}`;
+    }
+
+    function readDismissedUpcoming() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(DISMISSED_UPCOMING_KEY) || '{}');
+        const now = Date.now();
+        // Drop entries a day past their dismissal so the map cannot grow.
+        return Object.fromEntries(Object.entries(stored).filter(([, at]) => now - at < 86400000));
+      } catch {
+        return {};
+      }
+    }
+
+    function isUpcomingDismissed(event) {
+      return Boolean(readDismissedUpcoming()[upcomingKey(event)]);
+    }
+
+    function setUpcomingDismissed(event, dismissed) {
+      const map = readDismissedUpcoming();
+      if (dismissed) map[upcomingKey(event)] = Date.now();
+      else delete map[upcomingKey(event)];
+      try { localStorage.setItem(DISMISSED_UPCOMING_KEY, JSON.stringify(map)); } catch { /* best effort */ }
+    }
+
+    async function dismissUpcoming(event) {
+      const title = event.title || 'this event';
+      const addTo = async (key, value, message) => {
+        await ensureCalendarSettings();
+        const current = calendarSettings[key] || [];
+        if (current.some((entry) => entry.toLowerCase() === value.toLowerCase())) return;
+        await saveCalendarList(key, [...current, value]);
+        showActionToast(message, {
+          onUndo: () => saveCalendarList(key, (calendarSettings[key] || []).filter((entry) => entry !== value)),
+        });
+      };
+      const items = [
+        {
+          text: 'Not a meeting',
+          action: () => {
+            setUpcomingDismissed(event, true);
+            checkUpcoming();
+            showActionToast(`Hid “${title}”`, {
+              onUndo: () => { setUpcomingDismissed(event, false); checkUpcoming(); },
+            });
+          },
+        },
+        {
+          text: `Always hide “${title}”`,
+          action: () => addTo('ignore_title_contains', event.title, `Events titled “${title}” are hidden`)
+            .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
+        },
+      ];
+      if (event.calendar) {
+        items.push({
+          text: `Hide everything from “${event.calendar}”`,
+          action: () => addTo('ignore_calendars', event.calendar, `The “${event.calendar}” calendar is hidden`)
+            .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
+        });
+      }
+      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'capture' }) });
+      const button = document.getElementById('btn-dismiss-upcoming');
+      const rect = button.getBoundingClientRect();
+      const menu = await Menu.new({ items });
+      await menu.popup(new LogicalPosition(rect.left, rect.bottom + 4));
+    }
+
     async function checkUpcoming() {
       const upcoming = document.getElementById('upcoming');
       if (!desktopCapabilities.supportsCalendarIntegration) {
@@ -12177,9 +13077,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
       if (isRecording) return;
       try {
-        const events = await invoke('cmd_upcoming_meetings');
-        if (events && events.length > 0) {
+        const events = (await invoke('cmd_upcoming_meetings') || [])
+          .filter((event) => !isUpcomingDismissed(event));
+        if (events.length > 0) {
           const next = events[0];
+          document.getElementById('btn-dismiss-upcoming').onclick = () => dismissUpcoming(next);
           document.getElementById('upcoming-title').textContent = next.title;
           const mins = next.minutes_until;
           document.getElementById('upcoming-time').textContent =
@@ -12223,8 +13125,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function openSettings(options) {
       if (options?.keepDictationTarget !== true) invoke('cmd_clear_dictation_history_target').catch(() => {});
       settingsOverlay.classList.add('active');
-      // Reset to General tab on every open
-      settingsTabs[0].click();
+      // Open on the requested tab, else General.
+      const tab = options?.tab && document.querySelector(`.settings-tab[data-tab="${options.tab}"]`);
+      (tab || settingsTabs[0]).click();
       loadSettings();
     }
     function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }
@@ -12542,35 +13445,54 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const liveFallbackOrder = liveTranscript.fallback_order || [resolvedLiveBackend];
         const liveMentionsParakeet = liveBackend === 'parakeet' || liveFallbackOrder.includes('parakeet');
         const parakeetSelectable = s.transcription.parakeet_selectable === true;
+        const sherpaSelectable = s.transcription.sherpa_selectable === true;
         const parakeetUnavailableReason = s.transcription.parakeet_unavailable_reason || '';
         const parakeetStatus = s.transcription.parakeet_status || null;
         const appleSpeechStatus = s.transcription.apple_speech_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const autoOpt = engineSelect.querySelector('option[value="auto"]');
-        const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
+        const sherpaOpt = settingsSelectOption(engineSelect, 'sherpa');
+        const parakeetOpt = settingsSelectOption(engineSelect, 'parakeet');
         const engineAppleOpt = engineSelect.querySelector('option[value="apple-speech"]');
         const engineDetail = document.getElementById('settings-transcription-engine-detail');
         const liveBackendSelect = document.getElementById('settings-live-backend');
         const liveBackendDetail = document.getElementById('settings-live-backend-detail');
-        const liveParakeetOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="parakeet"]') : null;
+        const liveParakeetOpt = liveBackendSelect ? settingsSelectOption(liveBackendSelect, 'parakeet') : null;
         const liveAppleOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="apple-speech"]') : null;
         if (autoOpt) {
           autoOpt.textContent = s.transcription.auto_engine_reason === 'sherpa: model present'
             ? 'Auto (Parakeet)'
             : 'Auto (Whisper)';
         }
+        if (sherpaOpt) {
+          // Built-in Parakeet v3. Only offered when it can run here, or kept
+          // visible when it is the saved choice so the select can show it.
+          sherpaOpt.disabled = !sherpaSelectable;
+          sherpaOpt.textContent = sherpaSelectable
+            ? 'Parakeet v3 — built-in, fast on Apple Silicon'
+            : 'Parakeet v3 — unavailable, using Whisper';
+          setSettingsOptionPresent(engineSelect, sherpaOpt, sherpaSelectable || eng === 'sherpa', [parakeetOpt, engineAppleOpt]);
+        }
         if (parakeetOpt) {
+          // The parakeet.cpp subprocess engine is retired. Show it only to a
+          // config that still selects it, so nobody else sees a second,
+          // permanently unavailable "Parakeet" next to the working one.
           parakeetOpt.disabled = !parakeetSelectable;
           parakeetOpt.textContent = parakeetSelectable
             ? 'Parakeet — local backend'
-            : (eng === 'parakeet' ? 'Parakeet — unavailable, using Whisper' : 'Parakeet — unavailable');
+            : 'Parakeet — unavailable, using Whisper';
+          setSettingsOptionPresent(engineSelect, parakeetOpt, parakeetSelectable || eng === 'parakeet', [engineAppleOpt]);
         }
         if (engineDetail) {
           engineDetail.textContent = eng === 'parakeet' && !parakeetSelectable
             ? `Parakeet is ${parakeetUnavailableReason || 'unavailable'}; this retained preference resolves to Whisper for batch, recording, and recording-sidecar transcription.`
             : (eng === 'apple-speech'
               ? 'Apple Speech cannot accept sealed audio yet; this retained preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
-              : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.');
+              : (resolvedBatchEngine === 'sherpa'
+                ? 'Parakeet v3 runs on this Mac for batch, recording, and recording-sidecar transcription. Whisper takes over if Parakeet fails on a recording.'
+                : (eng === 'sherpa'
+                  ? 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
+                  : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.')));
         }
         if (engineAppleOpt) {
           engineAppleOpt.disabled = true;
@@ -12583,13 +13505,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           liveParakeetOpt.disabled = !parakeetSelectable;
           liveParakeetOpt.textContent = parakeetSelectable
             ? 'Parakeet — local backend'
-            : (liveBackend === 'parakeet' ? 'Parakeet — unavailable, using Whisper' : 'Parakeet — unavailable');
+            : 'Parakeet — unavailable, using Whisper';
+          setSettingsOptionPresent(liveBackendSelect, liveParakeetOpt, parakeetSelectable || liveBackend === 'parakeet', [liveAppleOpt]);
         }
         if (liveAppleOpt) {
           const appleSelectable = Boolean(appleSpeechStatus && appleSpeechStatus.selectable);
           liveAppleOpt.disabled = !appleSelectable;
           liveAppleOpt.textContent = appleSelectable
-            ? 'Apple Speech — experimental standalone live transcript'
+            ? 'Apple Speech — recommended on this Mac'
             : (liveBackend === 'apple-speech'
               ? 'Apple Speech — unavailable, using Whisper'
               : 'Apple Speech — unavailable');
@@ -12603,6 +13526,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             resolvedLiveBackend,
             liveFallbackOrder,
             resolvedBatchEngine,
+            Boolean(appleSpeechStatus && appleSpeechStatus.selectable),
           );
         }
         const batchUsesWhisper = resolvedBatchEngine === 'whisper';
@@ -12614,6 +13538,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           warmParakeetIfSelected(eng === 'parakeet' || resolvedLiveBackend === 'parakeet' ? 'parakeet' : eng);
         }
         document.getElementById('settings-whisper-model').value = s.transcription.model;
+        document.getElementById('settings-tiny-model-note').classList.toggle('is-hidden', s.transcription.model !== 'tiny');
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;
         const isDownloaded = dl.includes(selectedModel);
@@ -12709,6 +13634,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallDevMode = true;
           syncRecallModeControls({ persist: false });
         }
+        if (s.calendar) {
+          calendarSettings = {
+            ignore_calendars: s.calendar.ignore_calendars || [],
+            ignore_title_contains: s.calendar.ignore_title_contains || [],
+          };
+          calendarSettingsLoaded = true;
+          setSettingsToggle('settings-calendar-require-attendees', Boolean(s.calendar.require_attendees_or_url));
+          renderCalendarHiddenLists();
+        }
         // Call detection settings
         if (s.call_detection) {
           setSettingsToggle('settings-call-detection', s.call_detection.enabled);
@@ -12746,6 +13680,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             destinationDetail.textContent = 'Active-app insertion is unavailable in this session. Choose clipboard delivery so your transcript remains accessible.';
           }
           document.getElementById('settings-dictation-model').value = s.dictation.model || 'base';
+          renderDictationBackend(s.dictation);
           document.getElementById('settings-dictation-writing-style').value =
             ['none', 'off'].includes(s.dictation.cleanup_engine) ? 'literal' : 'natural';
           document.getElementById('settings-dictation-history-policy').value =
@@ -13313,6 +14248,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: e.target.value });
+      document.getElementById('settings-tiny-model-note').classList.toggle('is-hidden', e.target.value !== 'tiny');
       const s = await invoke('cmd_get_settings');
       const dl = s.transcription.downloaded_models || [];
       const isDownloaded = dl.includes(e.target.value);
@@ -13638,6 +14574,81 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
     }
 
+    // ── Calendar suggestion filters ──
+    // Lists edited here and from the × on the upcoming-meeting banner. The
+    // filters live in config.toml ([calendar]) and apply on the next check.
+    let calendarSettings = { ignore_calendars: [], ignore_title_contains: [] };
+    let calendarSettingsLoaded = false;
+
+    // Edits replace the whole list, so start from what config holds now:
+    // a list saved from an unloaded (empty) cache would wipe existing filters.
+    async function ensureCalendarSettings() {
+      if (calendarSettingsLoaded) return;
+      const s = await invoke('cmd_get_settings');
+      calendarSettings = {
+        ignore_calendars: s?.calendar?.ignore_calendars || [],
+        ignore_title_contains: s?.calendar?.ignore_title_contains || [],
+      };
+      calendarSettingsLoaded = true;
+    }
+
+    // Literal keys per list, so the settings-reachability guard sees each.
+    const CALENDAR_LIST_WRITERS = {
+      ignore_calendars: (values) => invoke('cmd_set_setting', { section: 'calendar', key: 'ignore_calendars', value: JSON.stringify(values) }),
+      ignore_title_contains: (values) => invoke('cmd_set_setting', { section: 'calendar', key: 'ignore_title_contains', value: JSON.stringify(values) }),
+    };
+
+    async function saveCalendarList(key, values) {
+      await CALENDAR_LIST_WRITERS[key](values);
+      calendarSettings[key] = values;
+      renderCalendarHiddenLists();
+      checkUpcoming();
+    }
+
+    function renderCalendarHiddenLists() {
+      const lists = [
+        ['settings-calendar-hidden-calendars', 'ignore_calendars', 'No hidden calendars.'],
+        ['settings-calendar-hidden-titles', 'ignore_title_contains', 'No hidden events.'],
+      ];
+      for (const [id, key, emptyText] of lists) {
+        const container = document.getElementById(id);
+        if (!container) continue;
+        const values = calendarSettings[key] || [];
+        if (!values.length) {
+          container.textContent = emptyText;
+          continue;
+        }
+        container.replaceChildren(...values.map((value) => {
+          const chip = document.createElement('span');
+          chip.className = 'settings-chip';
+          chip.append(value);
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.textContent = '×';
+          remove.setAttribute('aria-label', `Stop hiding ${value}`);
+          remove.addEventListener('click', () => {
+            saveCalendarList(key, values.filter((entry) => entry !== value))
+              .catch((e) => showActionToast(`Could not update calendar filters: ${e?.message || e}`, { tone: 'error' }));
+          });
+          chip.append(remove);
+          return chip;
+        }));
+      }
+    }
+
+    document.getElementById('settings-calendar-require-attendees').addEventListener('click', async () => {
+      const btn = document.getElementById('settings-calendar-require-attendees');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      setSettingsToggle('settings-calendar-require-attendees', !currentlyOn);
+      try {
+        await invoke('cmd_set_setting', { section: 'calendar', key: 'require_attendees_or_url', value: String(!currentlyOn) });
+        checkUpcoming();
+      } catch (e) {
+        setSettingsToggle('settings-calendar-require-attendees', currentlyOn);
+        console.error('calendar require_attendees_or_url:', e);
+      }
+    });
+
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {
       const btn = document.getElementById('settings-call-detection');
@@ -13765,6 +14776,33 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (window.MinutesI18n) window.MinutesI18n.setLocale(resolved);
       } catch (err) { console.error('set ui language:', err); }
     });
+    function renderDictationBackend(dictation) {
+      const select = document.getElementById('settings-dictation-backend');
+      const detail = document.getElementById('settings-dictation-backend-detail');
+      const autoOption = select.querySelector('option[value="auto"]');
+      const sherpaOption = select.querySelector('option[value="sherpa"]');
+      const available = dictation.sherpa_available === true;
+      const autoParakeet = dictation.auto_uses_parakeet === true;
+      const backend = ['auto', 'whisper', 'sherpa'].includes(dictation.backend) ? dictation.backend : 'whisper';
+      autoOption.textContent = autoParakeet ? 'Auto (Parakeet v3)' : 'Auto (Whisper)';
+      sherpaOption.disabled = !available && backend !== 'sherpa';
+      sherpaOption.textContent = available
+        ? 'Parakeet v3 — most accurate final text'
+        : 'Parakeet v3 — not installed';
+      select.value = backend;
+      if (backend === 'auto') {
+        detail.textContent = autoParakeet
+          ? 'Parakeet v3 writes the final text and Whisper shows words as you speak. Auto uses Whisper instead for languages Parakeet v3 does not cover.'
+          : 'Whisper shows words as you speak and writes the final text. Auto switches to Parakeet v3 when it is installed and covers your language.';
+      } else if (backend === 'sherpa' && available) {
+        detail.textContent = 'Whisper still shows words as you speak; Parakeet v3 writes the final text. If Parakeet cannot, Whisper does.';
+      } else if (backend === 'sherpa') {
+        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Run `minutes setup --sherpa` to install it.';
+      } else {
+        detail.textContent = 'Whisper shows words as you speak and writes the final text, in every language Whisper supports.';
+      }
+    }
+
     async function saveDictationSetting(key, value, control) {
       control.disabled = true;
       const previous = latestSettings?.dictation?.[key];
@@ -13772,6 +14810,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       try {
         const writers = {
           model: () => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: String(value) }),
+          backend: () => invoke('cmd_set_setting', { section: 'dictation', key: 'backend', value: String(value) }),
           history_policy: () => invoke('cmd_set_setting', { section: 'dictation', key: 'history_policy', value: String(value) }),
           silence_timeout_ms: () => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: String(value) }),
           voice_commands_enabled: () => invoke('cmd_set_setting', { section: 'dictation', key: 'voice_commands_enabled', value: String(value) }),
@@ -13789,6 +14828,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } finally { control.disabled = false; }
     }
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => saveDictationSetting('model', e.target.value, e.target));
+    document.getElementById('settings-dictation-backend').addEventListener('change', async (e) => {
+      if (await saveDictationSetting('backend', e.target.value, e.target) && latestSettings?.dictation) {
+        renderDictationBackend(latestSettings.dictation);
+      }
+    });
     document.getElementById('settings-dictation-history-policy').addEventListener('change', async (e) => {
       if (await saveDictationSetting('history_policy', e.target.value, e.target)) {
         document.getElementById('settings-dictation-recents-status').textContent = e.target.value === 'off' ? 'Routine history is off. Recoverable captures will still appear here.' : '';
@@ -14144,23 +15188,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let unifiedShortcutsActive = true;
 
     // ── One-time legacy localStorage → config.toml migration ──────────────
-    // Before this change, two settings lived ONLY in localStorage (and the
-    // in-memory AppState seeded from it), never in config.toml:
+    // config.toml is the source of truth for these settings:
     //   • minutes.notifyOnCompletion   → notifications.completion_enabled
     //   • minutes.globalHotkeyEnabled  → global_hotkey.shortcut_enabled
     //   • minutes.globalHotkeyShortcut → global_hotkey.shortcut
-    // config.toml is now the single source of truth for both. On the first
-    // launch after this update we copy any pre-existing localStorage value
-    // INTO config, then DELETE the localStorage key so the migration runs
-    // exactly once and the old drift source is gone. Key-removal is the
-    // one-time guard: once removed, getItem() returns null and the block is
-    // a no-op, so a machine that already migrated can never have a stale JS
-    // value clobber config. A separate `minutes.localStorageConfigMigrated`
-    // sentinel is also set as a belt-and-suspenders marker.
-    //
-    // The promise is awaited by the unified-shortcut restore below (and the
-    // notifications init reads config after it resolves) so the migrated
-    // values are on disk BEFORE anything reads cmd_get_settings.
+    // Copy any legacy value into config, then delete the key: removal is the
+    // run-once guard, so a stale JS value can never overwrite config later.
+    // Awaited before anything reads cmd_get_settings.
     const legacyConfigMigrationReady = (async () => {
       // One-time guard. updateSlotUI('quick_thought', …) re-writes the legacy
       // hotkey mirror keys on every status update (they're kept as legacy
@@ -14388,14 +15422,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
     });
-    openExternalBtn.addEventListener('click', async () => {
-      if (!currentMeetingPath) return;
-      try {
-        await invoke('cmd_open_file', { path: currentMeetingPath });
-      } catch (e) {
-        console.error('Open external:', e);
-      }
-    });
 
     // ══════════════════════════════════════════════════════════════
     // ── Recall panel ──
@@ -14475,7 +15501,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const assistantBtn = document.getElementById('btn-assistant');
     const splitHandle = document.getElementById('split-handle');
 
-    const COLLAPSED_WIDTH = 520;
     const EXPANDED_WIDTH = 960;
 
     function getZoomRatio() {
@@ -14483,11 +15508,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return z / 16;
     }
     const DEFAULT_RECALL_RATIO = 0.5;
-    // On Windows the OS window resize (expand→960, collapse→520) is jarring:
-    // closing the panel snaps the window to 520px regardless of the user's size.
-    // The CSS flex layout (recall-panel width:0 / expanded, app-left flex:1) handles
-    // the visual reflow on its own — the OS resize is purely a macOS UX choice.
-    // Skip it on Windows so the window stays at whatever size the user set.
+    // Windows skips the OS window resize on Recall open/close; the flex layout
+    // reflows on its own there (see ensureRecallWindowRoom).
     const IS_WINDOWS = typeof navigator !== 'undefined' &&
       navigator.platform &&
       navigator.platform.toLowerCase().startsWith('win');
@@ -14496,9 +15518,40 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const SESSION_ID = 'assistant';
 
     let recallExpanded = false;
+    let recallLastOutputAt = 0;
     let recallTerminal = null;
     let recallFitAddon = null;
     let recallPtyAlive = false;
+    // A terminal app picks its colours once, at startup (COLORFGBG). While
+    // that session runs the palette stays on the theme it started with:
+    // switching it underneath painted the app's text white-on-white after a
+    // dark-to-light toggle (dark-on-dark the other way).
+    let recallTerminalSessionDark = null;
+
+    function applyRecallTerminalTheme() {
+      const dark = recallPtyAlive && recallTerminalSessionDark !== null
+        ? recallTerminalSessionDark
+        : isEffectiveDarkTheme();
+      const theme = window.getMinutesTheme(dark);
+      // The container paints the padding around xterm's canvas.
+      recallTerminalContainer.style.backgroundColor = theme.background;
+      if (recallTerminal) recallTerminal.options.theme = theme;
+      return theme;
+    }
+
+    function markRecallPtyAlive() {
+      recallPtyAlive = true;
+      invoke('cmd_terminal_info', { sessionId: SESSION_ID })
+        .then((info) => { recallTerminalSessionDark = info?.theme_dark ?? null; })
+        .catch(() => { recallTerminalSessionDark = null; })
+        .finally(applyRecallTerminalTheme);
+    }
+
+    function markRecallPtyEnded() {
+      recallPtyAlive = false;
+      recallTerminalSessionDark = null;
+      applyRecallTerminalTheme();
+    }
     let recallPhase = 'recall';
     let userExplicitlyCollapsed = false;
     let recallInitialized = false;
@@ -14548,6 +15601,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // dismissed even when a readiness refresh re-sets it. Errors are never
     // auto-dismissed and carry no close control.
     let recallProviderNoticeDismissedText = '';
+    // The "ready, ask here" notice is only news the first time: once it has
+    // been dismissed (or typed past), it stays gone across launches. Sign-in
+    // prompts and errors still show.
+    const RECALL_READY_NOTICE_SEEN_KEY = 'minutes.recallReadyNoticeSeen';
+    let recallReadyNoticeText = '';
+
+    function recallReadyNoticeSeen() {
+      try { return localStorage.getItem(RECALL_READY_NOTICE_SEEN_KEY) === '1'; } catch { return false; }
+    }
 
     function setRecallProviderNotice(message, tone = 'info') {
       if (!recallProviderNotice) return;
@@ -14580,6 +15642,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (recallProviderNotice.dataset.tone === 'error') return;
       recallProviderNoticeDismissedText =
         recallProviderNotice.querySelector('.recall-provider-notice-text')?.textContent || '';
+      if (recallReadyNoticeText && recallProviderNoticeDismissedText === recallReadyNoticeText) {
+        try { localStorage.setItem(RECALL_READY_NOTICE_SEEN_KEY, '1'); } catch {}
+      }
       recallProviderNotice.classList.remove('active');
     }
 
@@ -14648,10 +15713,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return `${assistant} could not be found. Install it or choose an installed assistant in Settings. No meeting was read.`;
       }
       const meeting = pendingRecallTerminalMeetingPath ? 'the selected meeting' : 'meeting context';
-      const auth = readiness.terminalAuthenticated
-        ? `Ask your question here; Minutes will load ${meeting} only when you submit it.`
-        : `Sign in here first. Minutes will not read ${meeting} during sign-in.`;
-      return `${assistant} is open in Terminal. ${auth}`;
+      if (!readiness.terminalAuthenticated) {
+        return `${assistant} is open in Terminal. Sign in here first. Minutes will not read ${meeting} during sign-in.`;
+      }
+      if (recallReadyNoticeSeen()) return '';
+      recallReadyNoticeText = `${assistant} is open in Terminal. Ask your question here; Minutes will load ${meeting} only when you submit it.`;
+      return recallReadyNoticeText;
     }
 
     async function chooseRecallExperience(mode, meetingPath) {
@@ -14659,6 +15726,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return { mode, meetingPath };
       }
       recallSelectedMeetingPath = mode === 'meeting' ? meetingPath : null;
+      recallChatInput.placeholder = recallSelectedMeetingPath
+        ? 'Ask about this meeting…'
+        : 'Ask about your meetings…';
       let readiness;
       try {
         readiness = await refreshRecallReadiness();
@@ -14924,7 +15994,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallWeeklyContent.textContent = 'Loading weekly summary…';
       try {
         const summary = await invoke('cmd_weekly_summary');
-        recallWeeklyContent.textContent = summary.markdown || 'No weekly summary available.';
+        if (summary.markdown) renderMarkdownToElement(recallWeeklyContent, summary.markdown);
+        else recallWeeklyContent.textContent = 'No weekly summary available.';
       } catch (e) {
         console.error('Weekly summary:', e);
         recallWeeklyContent.textContent = `Could not load weekly summary: ${e}`;
@@ -14947,10 +16018,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // in which case the OS media query is the wrong authority — following
       // it painted a dark terminal slab into a light UI whenever the two
       // disagreed.
-      const effectiveTerminalDark = isEffectiveDarkTheme;
-
       recallTerminal = new Terminal({
-        theme: window.getMinutesTheme(effectiveTerminalDark()),
+        theme: applyRecallTerminalTheme(),
         fontFamily: "'Geist Mono', 'SF Mono', Menlo, monospace",
         fontSize: getTerminalFontSize(),
         lineHeight: 1.2,
@@ -14961,14 +16030,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
 
       recallThemeHandler = () => {
-        if (recallTerminal) recallTerminal.options.theme = window.getMinutesTheme(effectiveTerminalDark());
-        // The palette follows the theme live, but the TUI inside chose its
-        // colours at startup from COLORFGBG, which is fixed for the life of
-        // the process. A mismatched composer with no explanation reads as a
-        // bug; say what happened and what fixes it.
-        if (recallPtyAlive && recallDevMode) {
+        applyRecallTerminalTheme();
+        if (recallPtyAlive && recallDevMode && recallTerminalSessionDark !== null
+          && recallTerminalSessionDark !== isEffectiveDarkTheme()) {
           const name = recallReadiness?.assistantName || 'The assistant';
-          setRecallProviderNotice(`Theme changed. ${name} keeps its startup colours until the terminal session restarts (End Session, then reopen).`);
+          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colours until you end this session, so its text stays readable.`);
         }
       };
       // Re-theme when the app's own override flips, not only when the OS does.
@@ -15047,6 +16113,64 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             console.error('Recall terminal input:', error);
             setRecallProviderNotice(String(error), 'error');
           });
+      });
+
+      registerRecallTerminalFileDrop().catch((error) => {
+        console.error('Recall terminal file drop:', error);
+      });
+    }
+
+    // Tauri's window-level drag-drop handler consumes native file drops before
+    // the DOM sees them and reports the dropped paths as a window event, so
+    // HTML drop listeners never fire. Do what Terminal.app and Ghostty do with
+    // a dropped file: type its shell-escaped path at the prompt. Agents like
+    // Claude Code turn a pasted image path into an attachment, which is how a
+    // dragged screenshot reaches them in a normal terminal.
+    // Escape what Terminal.app escapes: ASCII shell metacharacters. Non-ASCII
+    // stays as is, including the U+202F narrow space macOS puts before "PM" in
+    // screenshot names; a backslash there stops agents recognizing the path.
+    function shellEscapeDroppedPath(path) {
+      return path.replace(/[ !"#$&'()*;<>?[\\\]^`{|}~]/g, '\\$&');
+    }
+
+    function recallTerminalDropRect() {
+      if (!recallTerminal || !recallPtyAlive) return null;
+      if (recallTerminalContainer.classList.contains('hidden')) return null;
+      const rect = recallTerminalContainer.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 ? rect : null;
+    }
+
+    function isOverRecallTerminal(position) {
+      const rect = recallTerminalDropRect();
+      if (!rect || !position) return false;
+      // Tauri labels the drag position physical, but on macOS wry reports
+      // AppKit points (wry src/wkwebview/drag_drop.rs), which already equal
+      // CSS pixels. Dividing by the 2x scale there put every drop on the
+      // left half of the window, over the sidebar, so none landed.
+      const scale = document.documentElement.dataset.platform === 'macos' ? 1 : window.devicePixelRatio;
+      const x = position.x / scale;
+      const y = position.y / scale;
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    async function registerRecallTerminalFileDrop() {
+      let draggingFiles = false;
+      // Relayed from the main window's native drag handler (main.rs). x/y are
+      // physical pixels relative to the window.
+      await window.__TAURI__.event.listen('recall:file-drag', (event) => {
+        const { type, paths, x, y } = event.payload || {};
+        if (type === 'enter') draggingFiles = Array.isArray(paths) && paths.length > 0;
+        const over = draggingFiles && isOverRecallTerminal(x == null ? null : { x, y });
+        recallTerminalContainer.classList.toggle('is-drop-target', over && type !== 'drop' && type !== 'leave');
+        if (type === 'leave') draggingFiles = false;
+        if (type !== 'drop') return;
+        draggingFiles = false;
+        if (!over || !paths?.length) return;
+        recallTerminal.focus();
+        // paste() routes through onData as user input, so the PTY write queue
+        // and shadow line see it like any other paste, and bracketed paste is
+        // applied when the TUI asked for it.
+        recallTerminal.paste(paths.map(shellEscapeDroppedPath).join(' ') + ' ');
       });
     }
 
@@ -15184,6 +16308,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       ptyListenersRegistered = true;
 
       await currentWindow.listen('pty:data:' + SESSION_ID, (event) => {
+        recallLastOutputAt = Date.now();
         if (!recallTerminal) return;
         const raw = atob(event.payload);
         const bytes = new Uint8Array(raw.length);
@@ -15208,7 +16333,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
 
       await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
-        recallPtyAlive = false;
+        markRecallPtyEnded();
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
       });
@@ -15256,12 +16381,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           // the backend keeps the already-running terminal session intact.
           await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme() });
           recallTerminalContextPending = true;
-          recallPtyAlive = true;
+          markRecallPtyAlive();
           recallEndBtn.classList.add('active');
         } catch (e) {
           const msg = typeof e === 'string' ? e : String(e);
           if (msg.includes('already running') || msg.includes('Already')) {
-            recallPtyAlive = true;
+            markRecallPtyAlive();
             recallEndBtn.classList.add('active');
           } else {
             console.error('Recall terminal spawn:', e);
@@ -15296,25 +16421,49 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── Expand / collapse with window resize ──
-    function applyRecallWindowLayout(width, options = {}) {
-      // Windows: skip OS resize — the flex layout reflows correctly without it,
-      // and forcing a width on collapse (520px) is jarring when the user had a
-      // different window size. macOS/Linux behavior is unchanged.
-      if (IS_WINDOWS) return Promise.resolve();
-      const ratio = getZoomRatio();
-      return invoke('cmd_apply_recall_window_layout', {
-        width: Math.round(width * ratio),
-        height: Math.round(640 * ratio),
+    // Recall needs room for two panes. Opening it widens a window that is too
+    // narrow for both; closing it gives back exactly the width it took, and
+    // only if the window has not been resized since. A size someone chose is
+    // never shrunk, and height is never touched.
+    let recallGrewWindow = null; // { from, to } logical widths
+
+    async function currentWindowLogicalWidth() {
+      const [size, scale] = await Promise.all([currentWindow.outerSize(), currentWindow.scaleFactor()]);
+      return size.width / scale;
+    }
+
+    async function ensureRecallWindowRoom(options = {}) {
+      if (IS_WINDOWS) return;
+      const needed = Math.round(EXPANDED_WIDTH * getZoomRatio());
+      const width = await currentWindowLogicalWidth();
+      if (width + 1 >= needed) return;
+      await invoke('cmd_apply_recall_window_layout', {
+        width: needed,
+        height: null,
         avoidRightEdge: !!options.avoidRightEdge,
+      });
+      // Keep the first "from" across repeated grows (a text-size bump while
+      // open), so closing returns to the size the person actually had.
+      recallGrewWindow = { from: recallGrewWindow?.from ?? width, to: needed };
+    }
+
+    async function returnRecallWindowRoom() {
+      const grew = recallGrewWindow;
+      recallGrewWindow = null;
+      if (IS_WINDOWS || !grew) return;
+      const width = await currentWindowLogicalWidth();
+      if (Math.abs(width - grew.to) > 2) return;
+      await invoke('cmd_apply_recall_window_layout', {
+        width: grew.from,
+        height: null,
+        avoidRightEdge: false,
       });
     }
 
     document.addEventListener('uizoomchange', async () => {
-      if (IS_WINDOWS) return;
+      if (!recallExpanded) return;
       const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
-      if (isFullscreen) return;
-      const targetWidth = recallExpanded ? EXPANDED_WIDTH : COLLAPSED_WIDTH;
-      applyRecallWindowLayout(targetWidth).catch(() => {});
+      if (!isFullscreen) ensureRecallWindowRoom().catch(() => {});
     });
 
     async function expandRecallPanel() {
@@ -15326,7 +16475,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
 
       if (!isFullscreen) {
-        await applyRecallWindowLayout(EXPANDED_WIDTH, { avoidRightEdge: true }).catch((e) => {
+        await ensureRecallWindowRoom({ avoidRightEdge: true }).catch((e) => {
           console.error('Recall expand layout:', e);
         });
       }
@@ -15372,7 +16521,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       setTimeout(async () => {
         if (!isFullscreen) {
-          await applyRecallWindowLayout(COLLAPSED_WIDTH).catch(() => { });
+          await returnRecallWindowRoom().catch(() => { });
         }
         recallExpanded = false;
         expandAnimating = false;
@@ -15440,7 +16589,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const opts = { mode, themeDark: isEffectiveDarkTheme() };
         if (meetingPath) opts.meetingPath = meetingPath;
         await invoke('cmd_spawn_terminal', opts);
-        recallPtyAlive = true;
+        markRecallPtyAlive();
         recallEndBtn.classList.add('active');
         if (mode === 'assistant' && !meetingPath) {
           try {
@@ -15453,7 +16602,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } catch (e) {
         const msg = typeof e === 'string' ? e : String(e);
         if (msg.includes('already running') || msg.includes('Already')) {
-          recallPtyAlive = true;
+          markRecallPtyAlive();
           recallLoading.classList.remove('active');
           recallTerminalContainer.classList.remove('hidden');
           recallEndBtn.classList.add('active');
@@ -15947,30 +17096,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
-    try {
-      const stored = localStorage.getItem('minutes-pending-update');
-      if (stored) {
-        // Dev builds disable auto-update (see main.rs). Clear any stale
-        // pending-update from a previous session so it doesn't resurrect
-        // a banner against a now-newer dev build.
-        Promise.all([
-          window.__TAURI__.app.getName?.() ?? Promise.resolve(''),
-          window.__TAURI__.app.getVersion(),
-        ]).then(([name, currentVersion]) => {
-          const isDev = typeof name === 'string' && name.includes('Dev');
-          if (isDev) {
-            localStorage.removeItem('minutes-pending-update');
-            return;
-          }
-          const { version, body, downloadBytes } = JSON.parse(stored);
-          if (version && version !== currentVersion) {
-            showUpdateBanner(version, body, downloadBytes);
-          } else {
-            localStorage.removeItem('minutes-pending-update');
-          }
-        }).catch(() => { });
-      }
-    } catch (_) { }
+    window.MinutesUpdateOffer.restore({
+      storage: localStorage,
+      app: window.__TAURI__.app,
+      show: showUpdateBanner,
+    });
 
     currentWindow.listen('update-ready', (event) => {
       const { version, body, downloadBytes } = event.payload;
@@ -16829,7 +17959,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else {
         setRecallPhase('recall', context || null);
       }
-      recallPtyAlive = true;
+      markRecallPtyAlive();
       recallLoading.classList.remove('active');
       // Only reveal the terminal when it's the active surface (dev mode); in
       // chat mode it must stay hidden so it doesn't steal the panel's height.
@@ -16845,7 +17975,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     currentWindow.onResized(async () => {
       const fs = await currentWindow.isFullscreen().catch(() => false);
       if (wasFullscreen && !fs && recallExpanded) {
-        await applyRecallWindowLayout(EXPANDED_WIDTH).catch(() => { });
+        await ensureRecallWindowRoom().catch(() => { });
         if (recallFitAddon) recallFitAddon.fit();
       }
       wasFullscreen = fs;
@@ -16867,14 +17997,34 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       collapseRecallPanel();
     });
 
+    // Ending a session while the agent is still writing loses the answer, and
+    // the button sits beside Weekly. While output is arriving, the first click
+    // only arms it; an idle session ends at once.
+    let recallEndArmTimer = null;
     recallEndBtn.addEventListener('click', async () => {
+      const busy = recallPtyAlive && Date.now() - recallLastOutputAt < 3000;
+      if (busy && !recallEndArmTimer) {
+        recallEndBtn.style.minWidth = `${recallEndBtn.offsetWidth}px`;
+        recallEndBtn.textContent = 'End now?';
+        recallEndArmTimer = setTimeout(resetRecallEndButton, 4000);
+        return;
+      }
+      resetRecallEndButton();
       try {
         await invoke('cmd_pty_kill', { sessionId: SESSION_ID });
-        recallPtyAlive = false;
+        markRecallPtyEnded();
       } catch (e) {
         console.error('End session:', e);
+        showActionToast(`Could not end the session: ${e?.message || e}`, { tone: 'error' });
       }
     });
+
+    function resetRecallEndButton() {
+      if (recallEndArmTimer) clearTimeout(recallEndArmTimer);
+      recallEndArmTimer = null;
+      recallEndBtn.textContent = 'End Session';
+      recallEndBtn.style.minWidth = '';
+    }
 
     function disposeRecallTerminal() {
       if (recallResizeObserver) {
@@ -16918,6 +18068,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         recallNoteInput.value = '';
       } catch (e) {
         console.error('Recall note:', e);
+        showNoteFailure(e);
       }
     }
 
@@ -16932,9 +18083,29 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const path = currentMeetingPath;
       const title = currentMeetingDetail ? currentMeetingDetail.title : 'Meeting';
       closeDetailView();
-      await openRecall('meeting', path);
-      setRecallPhase('debrief', title);
+      await discussMeetingWithAgent(path, title);
     });
+
+    // Every "Discuss with Agent" entry point. With the assistant already
+    // running in Terminal, opening Recall changes nothing on screen: the
+    // meeting is only queued for the next question, and a notice is no help
+    // because any terminal input dismisses it. Type a starter line naming the
+    // meeting at the prompt instead, without submitting it. The click visibly
+    // lands, the person can add a question or just press Return, and the
+    // context gate still holds: Minutes reads the meeting only on submit.
+    async function discussMeetingWithAgent(path, title) {
+      const name = title || 'Meeting';
+      await openRecall('meeting', path);
+      setRecallPhase('debrief', name);
+      if (!recallDevMode || !recallTerminal || !recallPtyAlive) return;
+      recallTerminal.focus();
+      // Never type over something the person already started.
+      if (recallTerminalInputDraft || !recallTerminalInputReliable) return;
+      // Name the file, not just the meeting: Minutes writes the selected
+      // meeting (summary and full transcript) to CURRENT_MEETING.md on submit,
+      // and a title alone sent the agent searching the corpus with shell tools.
+      recallTerminal.paste(`Discuss the meeting in CURRENT_MEETING.md (“${name}”): `);
+    }
 
     // ── Recording-aware phase transitions ──
     const originalCheckStatus = checkStatus;
@@ -17757,9 +18928,16 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
+    // External edits show up within a second while Minutes is in front; in
+    // the background a slower check is enough, and a hidden window needs none.
+    let openArtifactPollTicks = 0;
     function startOpenArtifactPolling() {
       if (openArtifactPollTimer) clearInterval(openArtifactPollTimer);
+      openArtifactPollTicks = 0;
       openArtifactPollTimer = setInterval(() => {
+        openArtifactPollTicks += 1;
+        if (document.hidden) return;
+        if (!document.hasFocus() && openArtifactPollTicks % 5 !== 0) return;
         refreshOpenArtifactIfChanged();
       }, 1000);
     }
@@ -18257,17 +19435,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     // Restore panel state from previous session
     (async () => {
-      // The assistant auto-open below spawns the *configured* agent CLI
-      // (settings.assistant.agent, default "claude"). It's optional — when
-      // that agent isn't installed, skip ONLY the auto-open so the panel
-      // doesn't pop up and immediately fail to spawn. Everything else in the
-      // restore (recallRatio, last open document, last open meeting) is
-      // untouched. The assistant is still reachable manually, where it shows
-      // the calm "optional" note.
-      //
-      // NOTE: gate on the *configured* agent specifically — cmd_list_agents
-      // also enumerates shells (bash/zsh) that exist on every machine, so a
-      // bare "any agent installed?" check would never report unavailable.
+      // The assistant is optional: when the configured agent CLI
+      // (settings.assistant.agent) is not installed, skip only the auto-open,
+      // so the panel does not pop up and fail to spawn. Gate on the configured
+      // agent, not "any agent": cmd_list_agents also lists shells that exist
+      // on every machine.
       let assistantAvailable = true;
       try {
         const [agents, settings] = await Promise.all([

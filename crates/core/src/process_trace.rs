@@ -177,13 +177,15 @@ fn write_event(stage: &'static str, context: &ProcessTraceContext, extra: serde_
 }
 
 fn trace_path() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("MINUTES_HOME") {
-        return Some(PathBuf::from(home).join("logs").join(TRACE_FILE));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
-        .map(|home| home.join(".minutes").join("logs").join(TRACE_FILE))
+    let log_dir = match std::env::var_os("MINUTES_HOME") {
+        Some(home) => PathBuf::from(home).join("logs"),
+        None => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)?
+            .join(".minutes")
+            .join("logs"),
+    };
+    Some(crate::logging::isolate_from_tests(log_dir).join(TRACE_FILE))
 }
 
 fn enabled() -> bool {

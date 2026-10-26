@@ -370,7 +370,7 @@ describe("Whisper model auto-setup", () => {
     );
   });
 
-  it("runs plain setup when auto has the plugin but the Parakeet model is missing", async () => {
+  it("preserves a ready Whisper choice when auto has the plugin but Parakeet is missing", async () => {
     const result = await runModelCheck({
       health: {
         ok: true,
@@ -384,8 +384,20 @@ describe("Whisper model auto-setup", () => {
       },
     });
 
-    expect(result.setups).toEqual([undefined]);
-    expect(result.logs.join("\n")).toContain("running minutes setup");
+    expect(result.setups).toEqual([]);
+    expect(result.logs.join("\n")).toContain("keeping your configured Whisper selection");
+  });
+
+  it("installs the configured model, never plain setup, when the auto fallback is missing too", async () => {
+    const result = await runModelCheck({
+      configExists: true,
+      health: { ok: true, data: {
+        engine: "auto", effective_engine: "whisper", model: "medium",
+        reason: "whisper: parakeet model missing — run minutes setup",
+        items: [missingItem],
+      } },
+    });
+    expect(result.setups).toEqual(["medium"]);
   });
 
   it("keeps explicit Whisper on the model-specific setup path for the same reason text", async () => {
@@ -451,20 +463,35 @@ describe("Whisper model auto-setup", () => {
     );
   });
 
-  it("keeps zero-touch tiny setup for an old CLI on a fresh machine", async () => {
+  it("uses small for a fresh profile whose health output omits the model", async () => {
     const result = await runModelCheck({
       health: { ok: true, data: { engine: "whisper", items: [missingItem] } },
       configExists: false,
     });
 
-    expect(result.setups).toEqual(["tiny"]);
+    expect(result.setups).toEqual(["small"]);
+  });
+
+  it("never retries with selecting setup if install-only setup is unsupported", async () => {
+    const calls: Array<string | undefined> = [];
+    const logs: string[] = [];
+    await ensureWhisperModel({
+      autoSetup: "1", checkState: { done: false },
+      health: async () => JSON.stringify({ ok: true, data: {
+        engine: "whisper", model: "medium", items: [missingItem],
+      } }),
+      setup: async (model) => { calls.push(model); throw new Error("unexpected argument --download-only"); },
+      log: (message) => logs.push(message),
+    });
+    expect(calls).toEqual(["medium"]);
+    expect(logs.join("\n")).toContain("upgrade Minutes first");
   });
 });
 
 describe("release asset selection", () => {
   it.each([
-    ["darwin", "arm64", "minutes-macos-arm64-sherpa.tar.gz"],
-    ["darwin", "x64", "minutes-macos-arm64-sherpa.tar.gz"],
+    ["darwin", "arm64", "minutes-macos-arm64-sherpa-shared.tar.gz"],
+    ["darwin", "x64", "minutes-macos-arm64-sherpa-shared.tar.gz"],
     ["linux", "x64", "minutes-linux-x64"],
     ["win32", "x64", "minutes-windows-x64.zip"],
     ["linux", "arm64", null],
@@ -4935,13 +4962,30 @@ describe("restricted content policy", () => {
     );
     try {
       let flipped = false;
-      const result = await policyListMeetings(meetingsDir, 10, false, () => {
-        if (flipped) return;
-        flipped = true;
-        writeFileSync(
-          path,
-          meeting("A private", "restricted", "POST-SNAPSHOT-PRIVATE-CANARY")
+      const finalManifestAttempts: number[] = [];
+      const result = await policyListMeetings(
+        meetingsDir,
+        10,
+        false,
+        () => {
+          if (flipped) return;
+          flipped = true;
+          writeFileSync(
+            path,
+            meeting("A private", "restricted", "POST-SNAPSHOT-PRIVATE-CANARY")
+          );
+        },
+        {
+          beforeFinalManifest: ({ attempt }) => {
+            finalManifestAttempts.push(attempt);
+          },
+        }
+      ).catch((error) => {
+        console.error(
+          "[corpus-retry-test]",
+          JSON.stringify({ platform: process.platform, flipped, finalManifestAttempts })
         );
+        throw error;
       });
       expect(result.map((item) => item.frontmatter.title)).toEqual(["B stable"]);
       expect(JSON.stringify(result)).not.toContain("POST-SNAPSHOT-PRIVATE-CANARY");

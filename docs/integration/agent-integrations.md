@@ -28,10 +28,13 @@ atomically replaces the installed binary and plugin. Releases from before the
 archive existed fall back to the checksum-verified bare macOS binary and log
 that Parakeet is unavailable.
 
-After installation, a default `engine = "auto"` health check that finds the
-plugin but no Parakeet model triggers plain `minutes setup`. That installs the
-Parakeet model and the Whisper tiny fallback without changing explicit engine
-choices.
+After installation, an `engine = "auto"` health check that finds the plugin but
+no Parakeet model keeps the configured Whisper selection and explains how to
+install Parakeet with `minutes setup`. Background Whisper installation uses
+`setup --model <configured-model> --download-only`, preserving model and engine
+preferences even if they change after the health check. An older CLI that does
+not support install-only setup needs an update; the server will not retry with
+a command that changes preferences.
 
 For a host that only reads existing transcripts, set `MINUTES_MCP_AUTO_SETUP` to `"0"` in the MCP server's environment to skip speech-model health checks and downloads. The generated `minutes-mcp --demo` configuration sets this option. The CLI remains required for meeting access rules and can still be installed automatically. Before recording, use the desktop setup or `minutes setup` to prepare the speech model.
 

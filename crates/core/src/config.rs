@@ -669,6 +669,10 @@ impl CopilotConfig {
 pub struct SearchConfig {
     pub engine: String,
     pub qmd_collection: Option<String>,
+    /// Local semantic search ("Related by meaning"). Off by default: it
+    /// downloads a 310 MB model and keeps a vector index of your meetings
+    /// under `~/.minutes/semantic` (restricted meetings are never indexed).
+    pub semantic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -838,6 +842,10 @@ pub struct CalendarConfig {
     /// When true, drop events that have neither attendees nor a meeting URL,
     /// such as personal blocks and reminders. Opt-in; defaults to false.
     pub require_attendees_or_url: bool,
+    /// Drop every event from these calendars (case-insensitive name match),
+    /// e.g. a shared family calendar. Only applies when the calendar source
+    /// reports calendar names (the EventKit helper does). Empty by default.
+    pub ignore_calendars: Vec<String>,
 }
 
 impl Default for CalendarConfig {
@@ -847,6 +855,7 @@ impl Default for CalendarConfig {
             use_event_title_for_meeting_title: false,
             ignore_title_contains: Vec::new(),
             require_attendees_or_url: false,
+            ignore_calendars: Vec::new(),
         }
     }
 }
@@ -967,7 +976,13 @@ impl IdentityConfig {
 #[serde(default)]
 pub struct DictationConfig {
     pub experience: crate::dictation_experience::DictationExperience,
+    /// Final-text engine: "auto" (Parakeet v3 where installed and the
+    /// language fits, otherwise Whisper), "whisper", "sherpa" (Parakeet v3),
+    /// or the retained "apple-speech" / "parakeet" values.
     pub backend: String,
+    /// Set once the one-time move from the old "whisper" default to "auto"
+    /// has run, so a later deliberate choice of Whisper is left alone.
+    pub auto_engine_migrated: bool,
     pub destination: String,
     pub accumulate: bool,
     pub daily_note_log: bool,
@@ -1016,7 +1031,8 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             experience: Default::default(),
-            backend: "whisper".into(),
+            backend: "auto".into(),
+            auto_engine_migrated: false,
             destination: "insert".into(),
             accumulate: true,
             daily_note_log: true,
@@ -1074,6 +1090,10 @@ pub struct RecordingConfig {
     /// Audio input device name override. When set, Minutes uses this device
     /// instead of the system default. Use `minutes devices` to list available names.
     pub device: Option<String>,
+    /// Explicit desktop meeting audio choice. None requires a first-use choice;
+    /// CLI recording intent and sources remain independent of this preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_audio_source: Option<String>,
     /// Automatically infer call intent when a known call app is detected.
     /// Default: false. Process-based detection has high false-positive rates
     /// (e.g. Zoom running but not in a call). Users trigger call capture
@@ -1111,6 +1131,7 @@ impl Default for RecordingConfig {
             max_duration_secs: 28800,
             min_disk_space_mb: 500,
             device: None,
+            desktop_audio_source: None,
             auto_call_intent: false,
             allow_degraded_call_capture: false,
             capture_backend: "cpal".into(),
@@ -1417,6 +1438,13 @@ pub struct LiveTranscriptConfig {
     pub max_utterance_secs: u64,
     /// Whether to save raw WAV alongside JSONL for post-meeting reprocessing.
     pub save_wav: bool,
+    /// Whether normal and call recordings run the live transcript sidecar.
+    ///
+    /// The final transcript never comes from the sidecar: the pipeline
+    /// re-transcribes the saved WAV after stop. Off, a recording only captures
+    /// audio and live-text readers see an explicit disabled state. Standalone
+    /// Live mode is unaffected.
+    pub recording_sidecar: bool,
     /// What to do with a saved standalone live transcript when the session stops.
     pub promote_on_stop: LiveTranscriptPromoteOnStop,
     /// Whether the keyboard shortcut is enabled.
@@ -1432,6 +1460,7 @@ impl Default for LiveTranscriptConfig {
             model: String::new(), // empty = use dictation model
             max_utterance_secs: 30,
             save_wav: true,
+            recording_sidecar: true,
             promote_on_stop: LiveTranscriptPromoteOnStop::Process,
             shortcut_enabled: false,
             shortcut: "CmdOrCtrl+Shift+L".into(),
@@ -1783,6 +1812,7 @@ impl Default for SearchConfig {
         Self {
             engine: "builtin".into(),
             qmd_collection: None,
+            semantic: false,
         }
     }
 }
@@ -2070,6 +2100,29 @@ impl Config {
                         "palette migration: persisting [palette] section in existing config at {}",
                         path.display()
                     );
+                }
+            }
+        }
+
+        // Dictation engine default: "whisper" was the compiled default and the
+        // only value the desktop app could write until it gained a dictation
+        // engine control, so a saved "whisper" almost never records a choice.
+        // Move it to "auto" once (Parakeet v3 where it is installed and the
+        // language fits, Whisper otherwise) and persist a marker, so a later
+        // deliberate choice of Whisper is never flipped back. A text edit on
+        // top of any earlier migration keeps comments and unknown keys.
+        if file_existed && !config.dictation.auto_engine_migrated {
+            if let Some(base) = migrated_toml.clone().or_else(|| raw_toml.clone()) {
+                if let Some((edited, moved)) = migrate_dictation_auto_engine(&base) {
+                    if moved {
+                        config.dictation.backend = "auto".into();
+                        tracing::info!(
+                            "dictation engine migration: moved the old whisper default to auto at {}",
+                            path.display()
+                        );
+                    }
+                    config.dictation.auto_engine_migrated = true;
+                    migrated_toml = Some(edited);
                 }
             }
         }
@@ -2398,6 +2451,59 @@ fn append_palette_section(raw: &str, palette: &PaletteConfig) -> String {
     output
 }
 
+/// Text edit behind the one-time dictation engine migration. Within
+/// `[dictation]`, turns `backend = "whisper"` into `backend = "auto"` and sets
+/// `auto_engine_migrated = true`; appends a minimal `[dictation]` section when
+/// there is none. Returns the edited text and whether the backend moved, or
+/// `None` when the marker is already set.
+fn migrate_dictation_auto_engine(raw: &str) -> Option<(String, bool)> {
+    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+    let is_header = |line: &str| line.trim_start().starts_with('[');
+    let Some(start) = lines.iter().position(|line| line.trim() == "[dictation]") else {
+        let mut edited = raw.to_string();
+        if !edited.is_empty() && !edited.ends_with('\n') {
+            edited.push('\n');
+        }
+        edited.push_str("\n[dictation]\nauto_engine_migrated = true\n");
+        return Some((edited, false));
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| is_header(line))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let key_of = |line: &str| line.split('=').next().map(|key| key.trim().to_string());
+    let value_of = |line: &str| {
+        line.split_once('=')
+            .map(|(_, value)| value.split('#').next().unwrap_or("").trim().to_string())
+    };
+    let mut flag_line = None;
+    let mut moved = false;
+    for (index, line) in lines.iter_mut().enumerate().take(end).skip(start + 1) {
+        match key_of(line).as_deref() {
+            Some("auto_engine_migrated") => {
+                if value_of(line).as_deref() == Some("true") {
+                    return None;
+                }
+                flag_line = Some(index);
+            }
+            Some("backend") if value_of(line).as_deref() == Some("\"whisper\"") => {
+                *line = "backend = \"auto\"".to_string();
+                moved = true;
+            }
+            _ => {}
+        }
+    }
+    match flag_line {
+        Some(index) => lines[index] = "auto_engine_migrated = true".to_string(),
+        None => lines.insert(start + 1, "auto_engine_migrated = true".to_string()),
+    }
+    let mut edited = lines.join("\n");
+    if raw.ends_with('\n') {
+        edited.push('\n');
+    }
+    Some((edited, moved))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2469,7 +2575,7 @@ mod tests {
         assert_eq!(config.copilot.grounding_refresh_secs, 15);
         assert_eq!(config.search.engine, "builtin");
         assert!(!config.daily_notes.enabled);
-        assert_eq!(config.dictation.backend, "whisper");
+        assert_eq!(config.dictation.backend, "auto");
         assert!(config.dictation.accumulate);
         assert!(config.call_detection.enabled);
         assert_eq!(config.watch.settle_delay_ms, 2000);
@@ -2694,6 +2800,68 @@ mod tests {
         assert!(error.contains("malformed"));
         assert!(!error.contains("PRIVATE-CONFIG-CANARY"));
         assert!(!Config::load_from(&path).knowledge.enabled);
+    }
+
+    #[test]
+    fn old_whisper_dictation_default_moves_to_auto_once() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[dictation]\nbackend = \"whisper\"\n").unwrap();
+
+        let migrated = Config::load_with_migrations_from(&path);
+        assert_eq!(migrated.dictation.backend, "auto");
+        assert!(migrated.dictation.auto_engine_migrated);
+        // Persisted, so the move does not depend on running again.
+        let on_disk = Config::load_strict_from(&path).unwrap();
+        assert_eq!(on_disk.dictation.backend, "auto");
+        assert!(on_disk.dictation.auto_engine_migrated);
+
+        // A deliberate choice of Whisper after the move is left alone.
+        let mut chosen = on_disk;
+        chosen.dictation.backend = "whisper".into();
+        chosen.save_to(&path).unwrap();
+        assert_eq!(
+            Config::load_with_migrations_from(&path).dictation.backend,
+            "whisper"
+        );
+    }
+
+    #[test]
+    fn dictation_migration_keeps_comments_and_appends_when_missing() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# mine\nmystery = \"keep-me\"\n\n[dictation]\n# engine\nbackend = \"whisper\" # old\nmodel = \"small\"\n",
+        )
+        .unwrap();
+        Config::load_with_migrations_from(&path);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("# mine")
+                && raw.contains("mystery = \"keep-me\"")
+                && raw.contains("# engine")
+        );
+        assert!(raw.contains("backend = \"auto\"") && raw.contains("auto_engine_migrated = true"));
+        assert!(raw.contains("model = \"small\""));
+
+        std::fs::write(&path, "[transcription]\nmodel = \"small\"\n").unwrap();
+        let config = Config::load_with_migrations_from(&path);
+        assert_eq!(config.dictation.backend, "auto");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("[transcription]\nmodel = \"small\""));
+        assert!(raw.contains("[dictation]\nauto_engine_migrated = true"));
+    }
+
+    #[test]
+    fn dictation_migration_keeps_non_default_engines() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[dictation]\nbackend = \"sherpa\"\n").unwrap();
+        let migrated = Config::load_with_migrations_from(&path);
+        assert_eq!(migrated.dictation.backend, "sherpa");
+        assert!(migrated.dictation.auto_engine_migrated);
+        assert_eq!(Config::default().dictation.backend, "auto");
     }
 
     #[test]
@@ -3117,6 +3285,25 @@ backend = "apple-speech"
         assert_eq!(config.live_transcript.backend, "apple-speech");
         assert_eq!(config.effective_live_transcript_backend(), "apple-speech");
         assert_eq!(config.transcription.engine, "whisper");
+    }
+
+    #[test]
+    fn recording_sidecar_defaults_on_and_can_be_turned_off_from_toml() {
+        assert!(LiveTranscriptConfig::default().recording_sidecar);
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[live_transcript]
+recording_sidecar = false
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(!config.live_transcript.recording_sidecar);
     }
 
     #[test]

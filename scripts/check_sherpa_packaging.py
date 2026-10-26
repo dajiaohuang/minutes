@@ -249,10 +249,41 @@ def check(workflow_text: str) -> list[str]:
                 f"{LOADER} must run after the packaged macOS dylib is signed"
             )
 
+    if not re.search(
+        r"for lib in libsherpa-onnx-c-api\.dylib libonnxruntime\.dylib[\s\S]*?"
+        r"cp(?:\s+-f)?\s+\"crates/sherpa-plugin/target/release/\$lib\"\s+\"\$out/\"",
+        mac_live,
+    ):
+        failures.append(
+            "the macOS sherpa archive must copy libsherpa-onnx-c-api.dylib and "
+            "libonnxruntime.dylib beside the plugin"
+        )
+    if not re.search(
+        r"for lib in libsherpa-onnx-c-api\.dylib libonnxruntime\.dylib; do\s*"
+        r"codesign\s+--force\s+--options\s+runtime\s+--timestamp\s*\\\s*"
+        r"--sign\s+\"\$APPLE_SIGNING_IDENTITY\"\s+\"\$out/\$lib\"",
+        mac_live,
+    ):
+        failures.append(
+            "the macOS sherpa archive must Developer ID-sign the sherpa and "
+            "ONNX Runtime dylibs it ships beside the plugin"
+        )
+
+    for required in [
+        "--features legacy-static --target-dir target/legacy-static",
+        'COPYFILE_DISABLE=1 tar czf "$out-shared.tar.gz" "$out"',
+        'cp -f crates/sherpa-plugin/target/legacy-static/release/libminutes_sherpa.dylib "$out/libminutes_sherpa.dylib"',
+        'rm -f "$out/libsherpa-onnx-c-api.dylib" "$out/libonnxruntime.dylib"',
+    ]:
+        if required not in mac_live:
+            failures.append("macOS must preserve the legacy archive and publish the shared archive separately: " + required)
+
     return failures
 
 
 MUTATIONS: list[tuple[str, object]] = [
+    ("drops the legacy plugin build", lambda s: s.replace("--features legacy-static --target-dir target/legacy-static", "")),
+    ("drops the shared archive", lambda s: s.replace('COPYFILE_DISABLE=1 tar czf "$out-shared.tar.gz" "$out"', "")),
     ("drops the plugin build", lambda s: s.replace(
         "( cd crates/sherpa-plugin && cargo build --release --locked )", "")),
     ("comments out the plugin build", lambda s: s.replace(
@@ -280,6 +311,11 @@ MUTATIONS: list[tuple[str, object]] = [
         "features: parakeet,metal,engine-sherpa", "features: parakeet,metal")),
     ("deletes the macOS plugin copy", lambda s: s.replace(
         '          cp -f "$plugin" "$out/"\n', "")),
+    ("deletes the macOS sherpa library copy", lambda s: s.replace(
+        '            cp -f "crates/sherpa-plugin/target/release/$lib" "$out/"\n', "")),
+    ("deletes macOS sherpa library signing", lambda s: s.replace(
+        '              codesign --force --options runtime --timestamp \\\n'
+        '                --sign "$APPLE_SIGNING_IDENTITY" "$out/$lib"\n', "")),
     ("deletes macOS plugin signing", lambda s: s.replace(
         '            codesign --force --options runtime --timestamp \\\n'
         '              --sign "$APPLE_SIGNING_IDENTITY" "$out/libminutes_sherpa.dylib"\n',

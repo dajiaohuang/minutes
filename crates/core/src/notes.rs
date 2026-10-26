@@ -86,6 +86,19 @@ fn elapsed_timestamp() -> Option<String> {
     Some(format!("{}:{:02}", mins, secs))
 }
 
+/// What a note written now would attach to, using the same checks as
+/// [`add_note`]: a sensitive meeting takes markers, a live recording takes
+/// timestamped notes, and with neither there is nowhere to put one.
+pub fn note_target() -> Option<&'static str> {
+    if crate::sensitive::is_active() {
+        Some("sensitive")
+    } else if crate::pid::inspect_pid_file(&crate::pid::pid_path()).is_active() {
+        Some("recording")
+    } else {
+        None
+    }
+}
+
 /// Add a note to the current recording.
 /// Returns the timestamped note line that was appended.
 pub fn add_note(text: &str) -> Result<String, String> {

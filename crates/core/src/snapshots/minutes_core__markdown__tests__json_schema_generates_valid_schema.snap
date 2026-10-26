@@ -1,6 +1,5 @@
 ---
 source: crates/core/src/markdown.rs
-assertion_line: 3124
 expression: schema
 ---
 {
@@ -183,6 +182,13 @@ expression: schema
           "type": "null"
         }
       ]
+    },
+    "spelling_corrections": {
+      "description": "Listed vocabulary misspellings rewritten to their canonical spelling in\nthe transcript (acronyms and terms, e.g. \"Sok 2\" to \"SOC 2\").",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SpellingCorrection"
+      }
     },
     "status": {
       "anyOf": [
@@ -764,6 +770,31 @@ expression: schema
         "diarized_speakers",
         "mapped_speakers",
         "attendees"
+      ]
+    },
+    "SpellingCorrection": {
+      "description": "One vocabulary spelling rewrite applied to a transcript, kept in the\nartifact's frontmatter so it stays auditable and reversible.",
+      "type": "object",
+      "properties": {
+        "corrected": {
+          "description": "The canonical spelling written in its place.",
+          "type": "string"
+        },
+        "count": {
+          "description": "How many times it was replaced.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "raw": {
+          "description": "The listed misspelling that was matched.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw",
+        "corrected",
+        "count"
       ]
     },
     "SummarizationHealth": {

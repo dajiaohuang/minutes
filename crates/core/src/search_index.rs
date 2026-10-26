@@ -78,8 +78,7 @@ pub(crate) fn live_fts_match_snippet(title: &str, body: &str, query: &str) -> Op
         "CREATE VIRTUAL TABLE live_doc USING fts5(
             title,
             body,
-            tokenize='porter unicode61 remove_diacritics 2',
-            prefix='2 3 4'
+            tokenize='porter unicode61 remove_diacritics 2'
         );",
     )
     .ok()?;
@@ -556,15 +555,12 @@ impl SearchIndex {
             // normal file can be reclassified as restricted without changing
             // the metadata values cached in an older index.
             let snapshot = match revision {
-                Some(revision) => revision.read_snapshot(&path),
+                Some(revision) => Some(revision.read_snapshot(&path).map_err(|error| {
+                    SearchIndexError::Io(error.materialization_message().into())
+                })?),
                 None => read_stable_active_markdown(&path, &self.corpus_root),
             };
             let Some(snapshot) = snapshot else {
-                if revision.is_some() {
-                    return Err(SearchIndexError::Io(
-                        "meeting changed while building the authorized search projection".into(),
-                    ));
-                }
                 let _ = self.delete_file_inner(&path);
                 stats.errored += 1;
                 continue;
@@ -1063,11 +1059,9 @@ impl SearchIndex {
         // the outer post-snapshot still rejects publication when membership
         // changed.
         for path in revision.paths() {
-            let snapshot = revision.read_snapshot(path).ok_or_else(|| {
-                SearchIndexError::Io(
-                    "meeting changed while building the authorized restricted projection".into(),
-                )
-            })?;
+            let snapshot = revision
+                .read_snapshot(path)
+                .map_err(|error| SearchIndexError::Io(error.materialization_message().into()))?;
             if let Some(result) = restricted_live_result(snapshot, filters) {
                 results.push(result);
             }
@@ -1741,6 +1735,88 @@ mod tests {
     }
 
     #[test]
+    fn authorized_projections_report_materialization_resource_limits() {
+        let (dir, config) = temp_config();
+        write_meeting(
+            &config.output_dir,
+            "unchanged",
+            "Synthetic title",
+            "Synthetic body",
+        );
+        let revision = crate::markdown::stable_active_corpus_revision(&config.output_dir).unwrap();
+        let idx = make_index(&dir, &config);
+        let deadline = std::time::Duration::from_secs(60);
+        for (budget, message) in [
+            (
+                ActiveCorpusReadBudget::new_until(std::time::Instant::now()),
+                "meeting corpus authorization deadline elapsed",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test(0, 1, 1024, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test(1, 1, 0, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test_with_paths(1, 1, 1024, 0, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+        ] {
+            let normal = revision.clone().with_read_budget(budget.fresh_pass());
+            let error = idx
+                .sync_for_active_corpus(&config, SyncMode::Auto, &normal)
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("I/O error: {message}"));
+
+            let restricted = revision.clone().with_read_budget(budget.fresh_pass());
+            let error = idx
+                .search_restricted_live_for_active_corpus(
+                    "",
+                    &SearchFilters {
+                        include_restricted: true,
+                        ..Default::default()
+                    },
+                    &restricted,
+                )
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("I/O error: {message}"));
+        }
+    }
+
+    #[test]
+    fn authorized_projections_refuse_changed_sources_without_file_details() {
+        let (dir, config) = temp_config();
+        let path = write_meeting(&config.output_dir, "changed", "Synthetic title", "Before");
+        let revision = crate::markdown::stable_active_corpus_revision(&config.output_dir).unwrap();
+        std::fs::write(path, "After").unwrap();
+        let idx = make_index(&dir, &config);
+
+        let error = idx
+            .sync_for_active_corpus(&config, SyncMode::Auto, &revision)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "I/O error: meeting corpus could not be reverified safely"
+        );
+        let error = idx
+            .search_restricted_live_for_active_corpus(
+                "",
+                &SearchFilters {
+                    include_restricted: true,
+                    ..Default::default()
+                },
+                &revision,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "I/O error: meeting corpus could not be reverified safely"
+        );
+    }
+
+    #[test]
     fn restricted_projection_iterates_only_the_prebound_revision() {
         let (dir, config) = temp_config();
         std::fs::write(
@@ -2067,6 +2143,30 @@ mod tests {
         idx.delete_file(&p).unwrap();
         let r2 = idx.search("find", &SearchFilters::default(), None).unwrap();
         assert!(r2.is_empty());
+    }
+
+    #[test]
+    fn partial_final_word_matches_without_a_prefix_index() {
+        // The FTS table has no prefix index (rebuilt per search, where the
+        // index cost far more than it saved); `term*` must still match.
+        let (dir, config) = temp_config();
+        write_meeting(
+            &config.output_dir,
+            "a",
+            "Alpha",
+            "we settled the pricing roadmap",
+        );
+        write_meeting(&config.output_dir, "b", "Beta", "nothing relevant here");
+        let idx = make_index(&dir, &config);
+        idx.sync(&config, SyncMode::Auto).unwrap();
+        for query in ["pr", "pric", "roadmap pri"] {
+            let results = idx.search(query, &SearchFilters::default(), None).unwrap();
+            assert_eq!(results.len(), 1, "query {query:?}");
+            assert!(results[0].snippet.contains("pricing"), "query {query:?}");
+        }
+        assert!(
+            live_fts_match_snippet("Alpha", "we settled the pricing roadmap", "pric").is_some()
+        );
     }
 
     #[test]

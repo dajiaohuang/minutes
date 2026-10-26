@@ -28,8 +28,9 @@ On Apple Silicon, the MCP server's auto-install fetches and checksum-verifies
 the sherpa archive, validates the extracted CLI, then atomically installs the
 binary and plugin together. Older releases without the archive fall back to the
 checksum-verified bare binary and stay on Whisper. When `auto` sees the plugin
-but the Parakeet model is missing, the MCP server runs plain `minutes setup`,
-which installs Parakeet plus the Whisper tiny fallback.
+but the Parakeet model is missing, the MCP server keeps the configured Whisper
+selection and explains how to install Parakeet with `minutes setup`. Background
+Whisper installation uses `--download-only`, so it cannot change saved models.
 
 ### Windows
 
@@ -225,7 +226,7 @@ cargo install --path crates/cli --features vulkan
 ```bash
 # Download whisper model (also downloads Silero VAD model for non-English audio)
 minutes setup --model small   # Recommended (466MB, good accuracy)
-minutes setup --model tiny    # Fastest (75MB, but misses quiet audio)
+minutes setup --model base --download-only  # Install the Live/dictation companion without changing meeting transcription
 minutes setup --model base    # Middle ground (141MB)
 
 # Install ffmpeg for non-WAV audio formats such as m4a/mp3/ogg/flac
@@ -258,8 +259,9 @@ minutes setup --diarization
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature, model, or plugin, transcription auto-falls-back
 # to Whisper (the bundled default), so a recording never breaks. See docs/architecture/sherpa-engine.md.
-# macOS sherpa builds are self-contained (static). On Linux/Windows, run from the
-# repo (cargo run) rather than copying the binary out of target/ — details in the doc.
+# On every platform the plugin loads its sherpa-onnx and ONNX Runtime shared libraries
+# from its own directory, so copy them with it. Run from the repo (cargo run) rather
+# than copying the binary out of target/. Details in the doc.
 
 # Parakeet preferences currently resolve to Whisper on every platform. The
 # pathname-only parakeet.cpp helper cannot safely receive Minutes' sealed

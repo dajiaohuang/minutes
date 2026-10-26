@@ -103,21 +103,19 @@
       font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
       background: var(--bg);
       color: var(--text);
-      padding: 14px;
       -webkit-user-select: none;
       user-select: none;
     }
 
+    /* The window is the container. A bordered card inside it spent ~56px of a
+       260px window on frames, and the textarea, the one flexible child, was
+       squeezed to nothing. */
     .shell {
       height: 100%;
       display: flex;
       flex-direction: column;
       gap: 12px;
-      padding: 14px;
-      border-radius: 14px;
-      border: 1px solid var(--border);
-      background: var(--surface-fill);
-      box-shadow: var(--shadow);
+      padding: 14px 16px 16px;
     }
 
     .header {
@@ -126,18 +124,10 @@
       gap: 4px;
     }
 
-    .label {
-      font-size: var(--text-meta);
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-
     .title {
       font-family: 'Instrument Serif', ui-serif, Georgia, serif;
-      font-size: var(--text-2xl);
-      line-height: 0.95;
+      font-size: var(--text-xl);
+      line-height: 1.1;
       letter-spacing: -0.03em;
       color: var(--text);
     }
@@ -146,40 +136,17 @@
       font-size: var(--text-xs);
       line-height: 1.45;
       color: var(--text-secondary);
-      max-width: 320px;
     }
 
     .input-wrap {
       flex: 1;
       display: flex;
       flex-direction: column;
-      min-height: 0;
+      min-height: 3.5em;
       padding: 10px;
       border-radius: 12px;
       border: 1px solid var(--border);
       background: var(--bg-elevated);
-    }
-
-    .input-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 8px;
-      font-size: var(--text-2xs);
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: var(--text-secondary);
-    }
-
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
     }
 
     textarea {
@@ -205,6 +172,8 @@
     textarea::placeholder {
       color: var(--text-tertiary);
     }
+
+    [hidden] { display: none !important; }
 
     .footer {
       display: flex;
@@ -288,23 +257,18 @@
 <body>
   <div class="shell">
     <div class="header">
-      <div class="label">Quick capture</div>
-      <div class="title">Add a note</div>
-      <div class="subtitle">Append context to the current session without breaking flow.</div>
+      <div class="title" id="note-title">Add a note</div>
+      <div class="subtitle" id="note-subtitle">Checking for a recording…</div>
     </div>
-    <div class="input-wrap">
-      <div class="input-meta">
-        <span class="pill">Local only</span>
-        <span id="note-length">0 chars</span>
-      </div>
+    <div class="input-wrap" id="note-compose" hidden>
       <textarea
         id="note-input"
-        placeholder="What's happening right now..."
+        placeholder="What just happened…"
         autofocus
       ></textarea>
     </div>
     <div class="footer">
-      <span class="hint"><kbd>&#8984;Return</kbd> save <span style="opacity:.5">·</span> <kbd>Esc</kbd> close</span>
+      <span class="hint" id="note-hint"><kbd>&#8984;Return</kbd> save <span style="opacity:.5">·</span> <kbd>Esc</kbd> close</span>
       <button class="btn btn-primary" id="save-btn" disabled>Save Note</button>
     </div>
   </div>
@@ -317,16 +281,59 @@
     const input = document.getElementById('note-input');
     const btn = document.getElementById('save-btn');
     const toast = document.getElementById('toast');
-    const noteLength = document.getElementById('note-length');
+    const compose = document.getElementById('note-compose');
+    const title = document.getElementById('note-title');
+    const subtitle = document.getElementById('note-subtitle');
+    const hint = document.getElementById('note-hint');
+
+    // A note is stamped into whatever is being captured right now, so say
+    // what that is before anyone types, and say plainly when it is nothing.
+    const NOTE_TARGETS = {
+      recording: {
+        title: 'Note for this recording',
+        subtitle: 'Stamped with the time and saved into this meeting’s notes.',
+      },
+      sensitive: {
+        title: 'Marker for this sensitive meeting',
+        subtitle: 'Saved with the time. Sensitive meetings capture nothing else.',
+      },
+    };
+    let noteTarget = null;
+
+    async function refreshNoteTarget() {
+      try {
+        noteTarget = await invoke('cmd_note_target');
+      } catch (e) {
+        console.error('Note target:', e);
+        noteTarget = null;
+      }
+      const copy = NOTE_TARGETS[noteTarget];
+      compose.hidden = !copy;
+      hint.hidden = !copy;
+      if (copy) {
+        title.textContent = copy.title;
+        subtitle.textContent = copy.subtitle;
+        btn.textContent = 'Save Note';
+        input.focus();
+      } else {
+        title.textContent = 'Nothing is recording';
+        subtitle.textContent = 'Notes are stamped into a recording while it runs, so they land in that meeting’s notes. Start a recording, then press ⌘⇧N to add one.';
+        btn.textContent = 'Close';
+      }
+      updateState();
+    }
 
     function updateState() {
-      btn.disabled = !input.value.trim();
-      noteLength.textContent = `${input.value.trim().length} chars`;
+      btn.disabled = Boolean(noteTarget) && !input.value.trim();
     }
 
     input.addEventListener('input', updateState);
 
     async function saveNote() {
+      if (!noteTarget) {
+        getCurrentWebviewWindow().close();
+        return;
+      }
       const text = input.value.trim();
       if (!text) return;
 
@@ -347,8 +354,10 @@
           }, 200);
         }, 600);
       } catch (e) {
-        // Not recording — show inline
-        toast.textContent = e;
+        // The recording can end between opening the window and saving. The
+        // typed text stays in the field either way.
+        await refreshNoteTarget();
+        toast.textContent = noteTarget ? String(e) : 'The recording ended before the note was saved.';
         toast.classList.add('error');
         toast.classList.add('show');
         setTimeout(() => {
@@ -372,9 +381,10 @@
       }
     });
 
-    // Focus the textarea on window show
-    input.focus();
-    updateState();
+    refreshNoteTarget();
+    getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) refreshNoteTarget();
+    });
   </script>
 </body>
 </html>

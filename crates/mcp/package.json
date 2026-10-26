@@ -1,6 +1,6 @@
 {
   "name": "minutes-mcp",
-  "version": "0.30.0",
+  "version": "0.30.10",
   "mcpName": "io.github.silverstein/minutes",
   "description": "MCP server for minutes \u2014 conversation memory for AI assistants. Works with Claude Desktop, Mistral Vibe, Cursor, Windsurf, and any MCP client.",
   "main": "dist/index.js",
@@ -34,7 +34,7 @@
     "build": "tsc && vite build",
     "build:ui": "vite build",
     "test": "npm run build && node ../../scripts/run_corpus_test_harness.mjs npm run test:integration",
-    "test:integration": "node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs && node test/mcp_http_transport_test.mjs && node test/surface_parity_test.mjs && node test/first_recall_test.mjs",
+    "test:integration": "node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs && node test/mcp_http_transport_test.mjs && node test/surface_parity_test.mjs && node test/first_recall_test.mjs && node test/model_setup_preferences_test.mjs",
     "test:unit": "node ../../scripts/run_corpus_test_harness.mjs npx vitest run",
     "test:host-compat": "node test/live_events_host_compat.mjs",
     "test:copilot": "node test/copilot_mcp_contract.mjs",
@@ -46,8 +46,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
-    "minutes-sdk": "0.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "minutes-sdk": "0.30.10",
     "yaml": "^2.8.3",
     "zod": "^3.25 || ^4.0"
   },

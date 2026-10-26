@@ -654,29 +654,111 @@ fn parakeet_status_view(config: &Config) -> ParakeetStatusView {
     minutes_core::transcription_coordinator::parakeet_backend_status(config)
 }
 
+/// Shown while the background capability check is still running.
+const APPLE_SPEECH_RUNTIME_CHECK_PENDING_REASON: &str =
+    "Minutes is still checking whether this Mac can run Apple Speech; reopen Settings in a moment";
+
+/// Shown when the signed transport binds but this Mac's Speech framework
+/// cannot run the transcriber, so the reason is not blamed on the transport.
+const APPLE_SPEECH_RUNTIME_UNAVAILABLE_REASON: &str =
+    "the Speech framework on this Mac cannot run the speech transcriber (macOS 26 or later is required)";
+
+/// Apple Speech availability for the desktop settings surface. `selectable`
+/// covers standalone live transcript only, the one surface the product gate
+/// opens; dictation and the main engine keep rejecting it.
 fn apple_speech_status_view() -> serde_json::Value {
+    apple_speech_status_view_for(&Config::load())
+}
+
+fn apple_speech_status_view_for(config: &Config) -> serde_json::Value {
     let transport_available =
         minutes_core::pipeline::apple_speech_private_audio_transport_supported();
-    match minutes_core::apple_speech::probe_capabilities() {
-        Ok(report) => serde_json::json!({
-            "supported": report.runtime_supported,
-            "selectable": false,
-            "transport_available": transport_available,
-            "unavailable_reason": if transport_available && report.runtime_supported {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(
-                    minutes_core::pipeline::apple_speech_unavailable_reason().into()
-                )
-            },
-            "report": report,
-        }),
-        Err(error) => serde_json::json!({
-            "supported": false,
-            "selectable": false,
-            "unavailable_reason": minutes_core::pipeline::apple_speech_unavailable_reason(),
-            "error": error.to_string(),
-        }),
+    let runtime_supported = transport_available && apple_speech_runtime_supported();
+    #[cfg(target_os = "macos")]
+    let runtime_check_pending =
+        transport_available && apple_speech_helper_reports_unavailable().is_none();
+    #[cfg(not(target_os = "macos"))]
+    let runtime_check_pending = false;
+    // A live session that loses Apple Speech mid-way falls back to Whisper. If
+    // that model is missing, the failed utterance has nowhere to go.
+    let fallback_ready = minutes_core::live_transcript::live_whisper_fallback_available(config);
+    let unavailable_reason = if !transport_available {
+        Some(minutes_core::pipeline::apple_speech_unavailable_reason().to_string())
+    } else if runtime_check_pending {
+        Some(APPLE_SPEECH_RUNTIME_CHECK_PENDING_REASON.to_string())
+    } else if !runtime_supported {
+        Some(APPLE_SPEECH_RUNTIME_UNAVAILABLE_REASON.to_string())
+    } else if !fallback_ready {
+        let model = if config.live_transcript.model.is_empty() {
+            &config.dictation.model
+        } else {
+            &config.live_transcript.model
+        };
+        Some(format!(
+            "the Whisper model live transcript falls back to (\"{model}\") is not installed; run `minutes setup --model {model}`"
+        ))
+    } else {
+        None
+    };
+    serde_json::json!({
+        "supported": runtime_supported,
+        "selectable": unavailable_reason.is_none(),
+        "transport_available": transport_available,
+        "fallback_ready": fallback_ready,
+        "unavailable_reason": unavailable_reason,
+    })
+}
+
+#[cfg(target_os = "macos")]
+static APPLE_SPEECH_HELPER_UNAVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Cached, non-blocking capability verdict; see [`apple_speech_runtime_supported`].
+/// `None` while the helper is still running: selection waits for its answer
+/// rather than letting an unsupported Mac pick Apple Speech in the meantime.
+#[cfg(target_os = "macos")]
+fn apple_speech_helper_reports_unavailable() -> Option<bool> {
+    static DEVELOPER_TOOLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    // `xcode-select -p` only prints a path, so it is cheap enough to ask here.
+    let developer_tools = *DEVELOPER_TOOLS.get_or_init(|| {
+        std::process::Command::new("/usr/bin/xcode-select")
+            .arg("-p")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
+    if !developer_tools {
+        return Some(false);
+    }
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let unavailable = matches!(
+                minutes_core::apple_speech::probe_capabilities(),
+                Ok(report) if !report.runtime_supported
+                    || report.speech_transcriber.is_available == Some(false)
+            );
+            let _ = APPLE_SPEECH_HELPER_UNAVAILABLE.set(unavailable);
+        });
+    });
+    APPLE_SPEECH_HELPER_UNAVAILABLE.get().copied()
+}
+
+/// SpeechAnalyzer's `SpeechTranscriber` ships with macOS 26. The version alone
+/// is not proof: some macOS 26 machines (virtual Macs among them) report the
+/// transcriber as unavailable. The capability helper can say so, but it is
+/// compiled with `xcrun swiftc`, which most Macs lack, and compiling or running
+/// it can take seconds. So it runs once, off the settings thread, only when
+/// `xcode-select -p` finds developer tools (otherwise `xcrun` opens Apple's
+/// install prompt). Until it answers, and on Macs without it, the version
+/// check decides; a definite "unavailable" from it blocks selection.
+fn apple_speech_runtime_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::call_capture::macos_major_version().is_some_and(|major| major >= 26)
+            && apple_speech_helper_reports_unavailable() == Some(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -770,6 +852,28 @@ fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
                 "download-model".into()
             },
             fallback_order: vec!["whisper".into()],
+        };
+    }
+
+    // `engine = "sherpa"` and an `auto` that resolves to sherpa both run the
+    // in-process Parakeet v3 engine. Reporting Whisper here made Settings show
+    // the Whisper model picker for a user who was not using Whisper.
+    if minutes_core::transcribe::transcription_engine_resolution(config).engine == "sherpa" {
+        let sherpa_model_dir = minutes_core::sherpa_engine::model_dir(config);
+        return SurfaceReadinessView {
+            configured_backend: config.transcription.engine.clone(),
+            resolved_backend: "sherpa".into(),
+            ready: true,
+            model_name: sherpa_model_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "parakeet-v3".into()),
+            detail: format!(
+                "Batch and recording transcription use built-in Parakeet v3, installed at {}. Whisper answers if Parakeet fails on a recording.",
+                sherpa_model_dir.display()
+            ),
+            next_action: "none".into(),
+            fallback_order: vec!["sherpa".into(), "whisper".into()],
         };
     }
 
@@ -991,6 +1095,12 @@ fn mark_model_ready_for_surface(
             let model_file = whisper_model_file(config, &readiness.model_name);
             if model_file.exists() {
                 mark_activation_model_ready(activation_progress, &model_file);
+            }
+        }
+        "sherpa" => {
+            let model_dir = minutes_core::sherpa_engine::model_dir(config);
+            if minutes_core::sherpa_engine::model_files_present(&model_dir) {
+                mark_activation_model_ready(activation_progress, &model_dir);
             }
         }
         _ => {}
@@ -2289,7 +2399,13 @@ pub fn load_activation_progress(config: &Config) -> Arc<Mutex<ActivationProgress
     }
 
     let model_file = model_file_for_config(config);
-    let latest_artifact = latest_saved_artifact_from_search(config);
+    // The search reads the whole corpus and runs before the window exists, so
+    // only pay for it while the first-artifact milestone is still missing.
+    let latest_artifact = progress
+        .first_artifact_saved_at
+        .is_none()
+        .then(|| latest_saved_artifact_from_search(config))
+        .flatten();
     changed |=
         backfill_activation_from_paths(&mut progress, &model_file, latest_artifact.as_deref());
 
@@ -2355,11 +2471,7 @@ fn activation_status_view(
     }
 }
 
-fn build_related_context(
-    config: &Config,
-    current_path: &Path,
-    frontmatter: &minutes_core::markdown::Frontmatter,
-) -> RelatedContextView {
+fn related_people_from(frontmatter: &minutes_core::markdown::Frontmatter) -> Vec<String> {
     let mut related_people = frontmatter.attendees.clone();
     for person in &frontmatter.people {
         if !related_people.iter().any(|existing| existing == person) {
@@ -2374,7 +2486,10 @@ fn build_related_context(
             related_people.push(entity.label.clone());
         }
     }
+    related_people
+}
 
+fn related_topics_from(frontmatter: &minutes_core::markdown::Frontmatter) -> Vec<String> {
     let mut related_topics = Vec::new();
     for decision in &frontmatter.decisions {
         if let Some(topic) = decision
@@ -2390,6 +2505,16 @@ fn build_related_context(
             }
         }
     }
+    related_topics
+}
+
+fn build_related_context(
+    config: &Config,
+    current_path: &Path,
+    frontmatter: &minutes_core::markdown::Frontmatter,
+) -> RelatedContextView {
+    let related_people = related_people_from(frontmatter);
+    let related_topics = related_topics_from(frontmatter);
 
     let mut related_meetings = Vec::new();
     let mut related_meeting_paths = std::collections::HashSet::new();
@@ -2509,6 +2634,13 @@ pub struct ProactiveContextBundleView {
     pub losing_touch_count: usize,
 }
 
+/// "Sat Oct 24" instead of an RFC 3339 timestamp; unparseable dates pass through.
+fn weekly_date_label(date: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(date)
+        .map(|date| date.format("%a %b %-d").to_string())
+        .unwrap_or_else(|_| date.to_string())
+}
+
 fn build_weekly_summary_markdown(
     meetings_count: usize,
     recent_titles: &str,
@@ -2517,7 +2649,8 @@ fn build_weekly_summary_markdown(
     open_actions_block: &str,
 ) -> String {
     format!(
-        "# Weekly Summary\n\n## Volume\n\n- {meetings_count} meeting or memo artifact(s) in the last 7 days.\n\n## Recent Meetings\n\n{recent_titles}\n\n## Decision Arcs\n\n{decision_conflicts}\n\n## Stale Commitments\n\n{stale_commitments}\n\n## Open Actions\n\n{open_actions_block}\n\n## Monday Brief\n\n- Confirm the highest-risk open commitment.\n- Review the most important decision conflict before the next meeting.\n- Turn the most important meeting into a durable artifact if it is still only in transcript form.\n"
+        "# Weekly Summary\n\n## Volume\n\n- {meetings_count} {} in the last 7 days.\n\n## Recent Meetings\n\n{recent_titles}\n\n## Decision Arcs\n\n{decision_conflicts}\n\n## Stale Commitments\n\n{stale_commitments}\n\n## Open Actions\n\n{open_actions_block}\n\n## Monday Brief\n\n- Confirm the highest-risk open commitment.\n- Review the most important decision conflict before the next meeting.\n- Turn the most important meeting into a durable artifact if it is still only in transcript form.\n",
+        if meetings_count == 1 { "meeting or memo" } else { "meetings and memos" }
     )
 }
 
@@ -2704,6 +2837,9 @@ pub struct DesktopCapabilities {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TerminalInfo {
     pub title: String,
+    /// Theme the running session started with (`None` when no session or
+    /// none was given), so the desktop palette can stay on it.
+    pub theme_dark: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -3508,11 +3644,18 @@ fn rescue_paired_stems(original: &std::path::Path, dest_dir: &Path, new_basename
 ///
 /// `start_native_call_recording` returns from several branches, so a drop guard
 /// is more reliable than setting the flag at each one (#576).
-struct LiveTranscriptStopGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+struct LiveTranscriptStopGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// With the sidecar off no thread clears the disabled status on stop.
+    clear_disabled_status: bool,
+}
 
 impl Drop for LiveTranscriptStopGuard {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if self.clear_disabled_status {
+            minutes_core::live_transcript::clear_status_file();
+        }
     }
 }
 
@@ -3575,15 +3718,26 @@ fn start_native_call_recording(
         return Err(error.to_string());
     }
     let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
-    let (publisher, subscriber) = minutes_core::live_partials::channel_with_source(
-        relay_epoch,
-        minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
-        "recording-sidecar",
-    );
-    let mut recording_partial_publisher = Some(publisher);
+    // Same gate as `capture::record_to_wav_with_lifecycle`: no sidecar, no partials.
+    let (mut recording_partial_publisher, recording_partial_subscriber) =
+        if config.live_transcript.recording_sidecar {
+            let (publisher, subscriber) = minutes_core::live_partials::channel_with_source(
+                relay_epoch,
+                minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
+                "recording-sidecar",
+            );
+            (Some(publisher), Some(subscriber))
+        } else {
+            (None, None)
+        };
+    let relay_evidence_mode = if recording_partial_subscriber.is_some() {
+        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials
+    } else {
+        minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+    };
     let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
-        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
-        Some(subscriber),
+        relay_evidence_mode,
+        recording_partial_subscriber,
     ) {
         Ok(relay) => Some(relay),
         Err(minutes_core::copilot::CaptureRelayError::AlreadyOwned(owner_pid)) => {
@@ -3609,19 +3763,21 @@ fn start_native_call_recording(
     // TOML may still contain the picker decoration (sample rate/channels).
     // ScreenCaptureKit resolves AVCaptureDevice.localizedName exactly, so
     // normalize at this boundary as well.
-    let configured_microphone = config
-        .recording
-        .device
+    let configured_microphone = crate::recording_audio::microphone(config)
         .as_deref()
         .and_then(minutes_core::capture::canonicalize_input_device_setting);
-    let mut session =
-        match call_capture::start_native_call_capture(configured_microphone.as_deref()) {
-            Ok(session) => session,
-            Err(error) => {
-                minutes_core::pid::remove().ok();
-                return Err(error);
-            }
-        };
+    let recovery_test_signal = app_handle.config().identifier == "com.useminutes.desktop.dev"
+        && std::env::var("MINUTES_CAPTURE_RECOVERY_TEST").as_deref() == Ok("1");
+    let mut session = match call_capture::start_native_call_capture(
+        configured_microphone.as_deref(),
+        recovery_test_signal,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            minutes_core::pid::remove().ok();
+            return Err(error);
+        }
+    };
     let output_path = session.output_path().to_path_buf();
     let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
@@ -3682,7 +3838,10 @@ fn start_native_call_recording(
     // Stop the feeder on every exit from this function, including the early
     // returns in the capture-failure branches below, so a finished recording
     // never leaves a thread polling the stems.
-    let _live_stop_guard = LiveTranscriptStopGuard(std::sync::Arc::clone(&live_stop));
+    let _live_stop_guard = LiveTranscriptStopGuard {
+        stop: std::sync::Arc::clone(&live_stop),
+        clear_disabled_status: !config.live_transcript.recording_sidecar,
+    };
     let live_transcript_started = {
         let base = output_path.with_extension("");
         let stem_name = base
@@ -3750,10 +3909,81 @@ fn start_native_call_recording(
     let mut safety_guard =
         minutes_core::capture::RecordingSafetyGuard::new(&config.recording, &output_path);
     let mut safety_stop_warning = None;
+    let mut stem_size_guard = minutes_core::capture::StemSizeGuard::new();
+    let mut last_stem_size_check = std::time::Instant::now();
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        // Stems grow ~200-400 KB/s; checking every 5 s overshoots by at most
+        // ~2 MB, far inside the guard's headroom.
+        if last_stem_size_check.elapsed() >= Duration::from_secs(5) {
+            last_stem_size_check = std::time::Instant::now();
+            let largest = session
+                .stem_paths()
+                .map(|stems| {
+                    [stems.voice, stems.system]
+                        .iter()
+                        .filter_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            match stem_size_guard.check(largest) {
+                minutes_core::capture::SafetyAction::Warning(message) => {
+                    let notice = OutputNotice {
+                        kind: "warning".into(),
+                        title: "Recording safety warning".into(),
+                        path: output_path.display().to_string(),
+                        detail: message,
+                        job_id: None,
+                    };
+                    set_latest_output(latest_output, Some(notice.clone()));
+                    maybe_show_completion_notification(
+                        app_handle,
+                        completion_notifications_enabled,
+                        &notice,
+                    );
+                }
+                minutes_core::capture::SafetyAction::Stop(reason, message) => {
+                    tracing::warn!(?reason, "{message}");
+                    safety_stop_warning = Some(message);
+                    stop_flag.store(true, Ordering::Relaxed);
+                    break;
+                }
+                _ => {}
+            }
+        }
         match session.check_capture_progress() {
             crate::call_capture::CaptureProgressAction::None => {}
+            crate::call_capture::CaptureProgressAction::Recovered(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call audio reconnected".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
+            crate::call_capture::CaptureProgressAction::Interrupted(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call capture interrupted".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
             crate::call_capture::CaptureProgressAction::Warning(message) => {
                 let notice = OutputNotice {
                     kind: "warning".into(),
@@ -3810,7 +4040,10 @@ fn start_native_call_recording(
             break;
         }
         if let Some(status) = session.try_wait()? {
-            if !status.success() {
+            if crate::call_capture::native_call_exit_is_unexpected(
+                status.success(),
+                stop_flag.load(Ordering::Relaxed),
+            ) {
                 let recording_finished_at = chrono::Local::now();
                 let user_notes = minutes_core::notes::read_notes();
                 let pre_context = minutes_core::notes::read_context();
@@ -5031,11 +5264,12 @@ pub fn show_user_notification(app_handle: &tauri::AppHandle, title: &str, body: 
             escape_applescript_literal(title)
         );
 
-        if std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-            .is_ok()
+        if minutes_core::spawn_reaped(
+            std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script),
+        )
+        .is_ok()
         {
             return;
         }
@@ -6313,6 +6547,26 @@ pub fn start_recording(
     if let Some(language) = language_override {
         config.transcription.language = Some(language);
     }
+    let requested_intent =
+        match crate::recording_audio::prepare(&mut config, mode, requested_intent) {
+            Ok(intent) => Some(intent),
+            Err(error) => {
+                set_recording_start_error(&latest_output, error.clone());
+                show_user_notification(&app_handle, "Recording not started", &error);
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                reset_hotkey_capture_state(
+                    hotkey_runtime.as_ref(),
+                    discard_short_hotkey_capture.as_ref(),
+                );
+                if error == crate::recording_audio::CHOICE_REQUIRED {
+                    crate::show_main_window(&app_handle);
+                    app_handle.emit("recording:audio-source-required", ()).ok();
+                }
+                return;
+            }
+        };
+    let allow_degraded = allow_degraded && requested_intent != Some(RecordingIntent::Call);
     // Re-validate the pinned input device at recording start so a
     // mid-session disconnect (Bluetooth headset turning off, USB device
     // unplugged) transparently falls back to the system default. Issue
@@ -6328,14 +6582,17 @@ pub fn start_recording(
         None
     };
     arm_desktop_call_capture_route(&mut config, requested_intent, desktop_call_loopback);
+    let native_route_allowed =
+        crate::recording_audio::native_route_allowed(&config, automatic_app.is_some());
     let preflight = match minutes_core::capture::preflight_recording_with_native_call_capture(
         mode,
         requested_intent,
         allow_degraded,
-        matches!(
-            call_capture::availability(),
-            call_capture::CallCaptureAvailability::Available { .. }
-        ),
+        native_route_allowed
+            && matches!(
+                call_capture::availability(),
+                call_capture::CallCaptureAvailability::Available { .. }
+            ),
         &config,
     ) {
         Ok(preflight) => preflight,
@@ -6352,11 +6609,28 @@ pub fn start_recording(
             return;
         }
     };
-    let native_call_capture_available = preflight.intent == RecordingIntent::Call
+    let native_call_capture_available = native_route_allowed
+        && preflight.intent == RecordingIntent::Call
         && matches!(
             call_capture::availability(),
             call_capture::CallCaptureAvailability::Available { .. }
         );
+    if let Err(error) = crate::recording_audio::validate_route(
+        &config,
+        preflight.intent,
+        native_call_capture_available,
+        preflight.microphone_permission,
+    ) {
+        set_recording_start_error(&latest_output, &error);
+        show_user_notification(&app_handle, "Recording not started", &error);
+        starting.store(false, Ordering::Relaxed);
+        recording.store(false, Ordering::Relaxed);
+        reset_hotkey_capture_state(
+            hotkey_runtime.as_ref(),
+            discard_short_hotkey_capture.as_ref(),
+        );
+        return;
+    }
     // Recheck inside the worker: availability can change after reservation.
     if automatic_app.is_some() && !native_call_capture_available {
         let error = "Automatic recording requires native call capture. Open Minutes to check capture access.";
@@ -6410,42 +6684,16 @@ pub fn start_recording(
                 return;
             }
             Err(error) => {
-                if automatic_app.is_some() {
-                    let detail = format!("Automatic native call recording failed: {error}");
-                    set_recording_start_error(&latest_output, &detail);
-                    show_user_notification(
-                        &app_handle,
-                        "Automatic recording did not start",
-                        &detail,
-                    );
-                    starting.store(false, Ordering::Relaxed);
-                    recording.store(false, Ordering::Relaxed);
-                    return;
-                }
-                eprintln!("Native call recording unavailable, falling back: {}", error);
-                minutes_core::logging::log_error(
-                    "desktop_native_call_start",
-                    "",
-                    &format!("native call recording unavailable, falling back: {error}"),
+                let detail = format!("Microphone + system audio could not start: {error}. Recording has not started. Check capture access in Settings, or choose Microphone only for a room meeting.");
+                set_recording_start_error(&latest_output, &detail);
+                show_user_notification(&app_handle, "Recording not started", &detail);
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                reset_hotkey_capture_state(
+                    hotkey_runtime.as_ref(),
+                    discard_short_hotkey_capture.as_ref(),
                 );
-                if let Some(reason) = &preflight.blocking_reason {
-                    set_recording_start_error(
-                        &latest_output,
-                        format!("{reason}\n\nNative call capture failed: {error}"),
-                    );
-                    show_user_notification(
-                        &app_handle,
-                        "Recording blocked",
-                        &format!("{}\n\nNative call capture failed: {}", reason, error),
-                    );
-                    starting.store(false, Ordering::Relaxed);
-                    recording.store(false, Ordering::Relaxed);
-                    reset_hotkey_capture_state(
-                        hotkey_runtime.as_ref(),
-                        discard_short_hotkey_capture.as_ref(),
-                    );
-                    return;
-                }
+                return;
             }
         }
     }
@@ -6507,8 +6755,18 @@ pub fn start_recording(
 
     // Inject live transcript context into the assistant workspace so the Recall
     // panel (and any connected agent) can read the live JSONL during recording.
-    if let Ok(workspace) = crate::context::create_workspace(&config) {
-        update_assistant_live_context(&workspace, true);
+    // With the sidecar off nothing writes that JSONL, so the marker stays out.
+    if config.live_transcript.recording_sidecar {
+        if let Ok(workspace) = crate::context::create_workspace(&config) {
+            update_assistant_live_context(&workspace, true);
+        }
+    }
+    let mut capabilities = vec![
+        "audio.capture".to_string(),
+        format!("mode.{}", mode.noun().replace(' ', "-")),
+    ];
+    if config.live_transcript.recording_sidecar {
+        capabilities.insert(1, "live.utterance.final".to_string());
     }
 
     let _desktop_context_collector = context_session_id.as_ref().and_then(|session_id| {
@@ -6533,11 +6791,7 @@ pub fn start_recording(
         Some(minutes_core::capture::RecordingStartedContext {
             session_id: context_session_id.clone(),
             source: "capture".into(),
-            capabilities: vec![
-                "audio.capture".into(),
-                "live.utterance.final".into(),
-                format!("mode.{}", mode.noun().replace(' ', "-")),
-            ],
+            capabilities,
         }),
     ) {
         Ok(()) => {
@@ -6762,8 +7016,22 @@ pub fn launch_recording(
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
 ) -> Result<LaunchOutcome, String> {
+    validate_recording_launch_state(state)
+        .map_err(|error| reject_recording_launch(state, error))?;
+    let config = Config::load_strict().map_err(|error| reject_recording_launch(state, error))?;
+    let mut session_config = config.clone();
+    let requested_intent = Some(
+        crate::recording_audio::prepare(&mut session_config, mode, requested_intent).map_err(
+            |error| {
+                if error == crate::recording_audio::CHOICE_REQUIRED {
+                    crate::show_main_window(&app);
+                    app.emit("recording:audio-source-required", ()).ok();
+                }
+                reject_recording_launch(state, error)
+            },
+        )?,
+    );
     if mode == CaptureMode::Meeting {
-        let config = Config::load();
         if let Some(disclosure) = desktop_recording_consent_required(mode, &config, false) {
             // Palette, tray, hotkey, and desktop-control starts end in the
             // same UI, so Require routes them to the same blocking modal as
@@ -6773,7 +7041,11 @@ pub fn launch_recording(
             crate::show_main_window(&app);
             let _ = app.emit(
                 "minutes://recording-consent-required",
-                serde_json::json!({ "disclosure": disclosure }),
+                serde_json::json!({ "disclosure": disclosure, "args": {
+                    "mode": "meeting", "intent": requested_intent,
+                    "allowDegraded": false, "title": requested_title,
+                    "language": language_override,
+                }}),
             );
             return Ok(LaunchOutcome::ConsentRequested);
         }
@@ -7218,7 +7490,18 @@ pub fn cmd_start_recording(
 
     validate_recording_launch_state(&state)
         .map_err(|error| reject_recording_launch(&state, error))?;
-    let config = Config::load();
+    let config = Config::load_strict().map_err(|error| reject_recording_launch(&state, error))?;
+    let mut session_config = config.clone();
+    let requested_intent = Some(
+        crate::recording_audio::prepare(&mut session_config, capture_mode, requested_intent)
+            .map_err(|error| {
+                if error == crate::recording_audio::CHOICE_REQUIRED {
+                    crate::show_main_window(&app);
+                    app.emit("recording:audio-source-required", ()).ok();
+                }
+                reject_recording_launch(&state, error)
+            })?,
+    );
     if let Some(disclosure) = desktop_recording_consent_required(
         capture_mode,
         &config,
@@ -7304,6 +7587,13 @@ pub fn cmd_extend_recording() -> Result<(), String> {
 #[tauri::command]
 pub fn cmd_add_note(text: String) -> Result<String, String> {
     minutes_core::notes::add_note(&text)
+}
+
+/// Lets the note window say up front whether a note has anywhere to go,
+/// instead of failing only after the person has typed it.
+#[tauri::command]
+pub fn cmd_note_target() -> Option<&'static str> {
+    minutes_core::notes::note_target()
 }
 
 /// Start a no-capture sensitive meeting from the desktop app.
@@ -7529,6 +7819,7 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
             "latestFinalAgeSecs": live.latest_final_age_secs,
             "source": live.source.as_ref(),
             "diagnostic": live.diagnostic.as_deref(),
+            "disabled": live.disabled.is_some(),
         })),
     });
 
@@ -7628,8 +7919,12 @@ fn capture_status_audio_level(
 }
 
 #[tauri::command]
-pub fn cmd_capture_status(state: tauri::State<AppState>) -> serde_json::Value {
-    status_value(&state, false)
+// Async so the 1–2 s status poll runs off the main thread (it reads pid,
+// session and config files every tick).
+pub async fn cmd_capture_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    Ok(status_value(&state, false))
 }
 
 #[tauri::command]
@@ -7712,7 +8007,7 @@ fn cmd_weekly_summary_blocking() -> Result<WeeklySummaryView, String> {
         meetings
             .iter()
             .take(6)
-            .map(|meeting| format!("- {} ({})", meeting.title, meeting.date))
+            .map(|meeting| format!("- {} · {}", meeting.title, weekly_date_label(&meeting.date)))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -7939,12 +8234,19 @@ fn list_meetings_value(limit: usize) -> Result<serde_json::Value, String> {
     let search_duration = search_started.elapsed();
     let limited: Vec<_> = results.into_iter().take(limit).collect();
     let badges_started = Instant::now();
+    // Badges re-read each file, so only the rows a person sees first get them;
+    // the rest of the full inventory stays metadata-only.
     let enriched: Result<Vec<serde_json::Value>, String> = limited
         .iter()
-        .map(|result| {
+        .enumerate()
+        .map(|(index, result)| {
             let mut value = serde_json::to_value(result)
                 .map_err(|error| format!("Meeting inventory could not be encoded: {error}"))?;
-            let badges = compute_lifecycle_badges(&result.path, &prep_slugs);
+            let badges = if index < LIFECYCLE_BADGE_ROWS {
+                compute_lifecycle_badges(&result.path, &prep_slugs)
+            } else {
+                Vec::new()
+            };
             value["badges"] = serde_json::json!(badges);
             Ok(value)
         })
@@ -7960,9 +8262,11 @@ fn list_meetings_value(limit: usize) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!(enriched?))
 }
 
+const LIFECYCLE_BADGE_ROWS: usize = 100;
+
 #[tauri::command]
 pub async fn cmd_list_meetings(limit: Option<usize>) -> Result<serde_json::Value, String> {
-    let requested_limit = limit.unwrap_or(20).clamp(1, 100);
+    let requested_limit = limit.unwrap_or(20).clamp(1, 5000);
     run_json_inventory(&MEETING_INVENTORY, "Meeting inventory", move || {
         list_meetings_value(requested_limit)
     })
@@ -8034,7 +8338,7 @@ pub fn cmd_search_blocking(
 #[tauri::command]
 pub fn cmd_list_devices() -> serde_json::Value {
     let config = Config::load();
-    let configured_device = config.recording.device.clone();
+    let configured_device = crate::recording_audio::microphone(&config);
     let entries = minutes_core::capture::list_input_devices_detailed();
     // Back-compat: preserve the decorated label list for any caller that
     // still reads `devices`, while exposing structured entries so pickers
@@ -8044,6 +8348,7 @@ pub fn cmd_list_devices() -> serde_json::Value {
         "devices": legacy_labels,
         "entries": entries,
         "configured_device": configured_device,
+        "desktop_audio_source": crate::recording_audio::saved_choice(&config).ok().flatten().map(|source| source.as_str()),
     })
 }
 
@@ -8110,18 +8415,31 @@ fn delete_meeting_artifacts(
     Ok(())
 }
 
+/// One file moved into the archive folder. The desktop app keeps these so an
+/// Undo can put every file back exactly where it came from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ArchivedFileMove {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
 fn archive_meeting_artifacts(
     md_path: &Path,
     archive_dir: &Path,
     audio_artifacts: &[PathBuf],
     with_audio: bool,
-) -> Result<(), String> {
+) -> Result<Vec<ArchivedFileMove>, String> {
+    let mut moves = Vec::new();
     let dest_md = archive_dir.join(
         md_path
             .file_name()
             .ok_or_else(|| format!("missing filename for {}", md_path.display()))?,
     );
     std::fs::rename(md_path, &dest_md).map_err(|e| e.to_string())?;
+    moves.push(ArchivedFileMove {
+        from: md_path.to_path_buf(),
+        to: dest_md,
+    });
 
     if with_audio {
         for path in audio_artifacts.iter().filter(|path| path.exists()) {
@@ -8130,10 +8448,128 @@ fn archive_meeting_artifacts(
                 .ok_or_else(|| format!("missing filename for {}", path.display()))?;
             let dest_audio = archive_dir.join(file_name);
             std::fs::rename(path, &dest_audio).map_err(|e| e.to_string())?;
+            moves.push(ArchivedFileMove {
+                from: path.clone(),
+                to: dest_audio,
+            });
         }
     }
 
+    Ok(moves)
+}
+
+/// Check off (or reopen) one action item from the meeting detail view. Only
+/// Markdown files inside the meetings folder can be edited this way.
+#[tauri::command]
+pub fn cmd_set_action_item_status(path: String, index: usize, done: bool) -> Result<(), String> {
+    let output_dir = std::fs::canonicalize(Config::load().output_dir).map_err(|e| e.to_string())?;
+    let md_path = std::fs::canonicalize(&path).map_err(|_| format!("File not found: {path}"))?;
+    if !md_path.starts_with(&output_dir)
+        || md_path.extension().and_then(|ext| ext.to_str()) != Some("md")
+    {
+        return Err("Only meetings in your meetings folder can be edited".into());
+    }
+    minutes_core::markdown::set_action_item_status(&md_path, index, done).map_err(|e| e.to_string())
+}
+
+/// Archive a meeting and its audio without a confirmation dialog. Archiving
+/// only moves files into `<output_dir>/archive`, so the desktop app offers
+/// Undo instead of asking first; the returned moves are what Undo reverses.
+#[tauri::command]
+pub fn cmd_archive_meeting(path: String) -> Result<Vec<ArchivedFileMove>, String> {
+    let md_path = PathBuf::from(&path);
+    if !md_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+    let audio_artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md_path);
+    let archive_dir = Config::load().output_dir.join("archive");
+    std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
+    archive_meeting_artifacts(&md_path, &archive_dir, &audio_artifacts, true)
+}
+
+#[tauri::command]
+pub fn cmd_restore_archived_meeting(moves: Vec<ArchivedFileMove>) -> Result<(), String> {
+    let output_dir = Config::load().output_dir;
+    restore_archived_meeting(&output_dir, &moves)
+}
+
+/// Reverse an archive. Every move is checked before any file is touched: the
+/// source must still be in the archive folder, and the destination must be
+/// free and inside the meetings folder, so a stale or forged receipt can
+/// neither overwrite a file nor move one anywhere else.
+fn restore_archived_meeting(output_dir: &Path, moves: &[ArchivedFileMove]) -> Result<(), String> {
+    let output_dir = std::fs::canonicalize(output_dir).map_err(|e| e.to_string())?;
+    let archive_dir = output_dir.join("archive");
+    for item in moves {
+        let archived = std::fs::canonicalize(&item.to)
+            .map_err(|_| format!("{} is no longer in the archive", item.to.display()))?;
+        if archived.parent() != Some(archive_dir.as_path()) {
+            return Err(format!(
+                "{} is not in the archive folder",
+                item.to.display()
+            ));
+        }
+        let original_parent = item
+            .from
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .ok_or_else(|| format!("{} no longer exists", item.from.display()))?;
+        if !original_parent.starts_with(&output_dir) || original_parent.starts_with(&archive_dir) {
+            return Err(format!(
+                "{} is outside the meetings folder",
+                item.from.display()
+            ));
+        }
+        if item.from.exists() {
+            return Err(format!("{} already exists", item.from.display()));
+        }
+    }
+    for item in moves {
+        std::fs::rename(&item.to, &item.from).map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+/// Copy a file's path. A menu action is not a user gesture to WebKit, so the
+/// web clipboard API would refuse it; the native clipboard does not.
+#[tauri::command]
+pub fn cmd_copy_path(path: String) -> Result<(), String> {
+    copy_to_clipboard(&path)
+}
+
+/// Show a file selected in Finder (or Explorer). Elsewhere, open its folder.
+#[tauri::command]
+pub fn cmd_reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(target.as_os_str());
+        std::process::Command::new("explorer")
+            .arg(select)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let folder = target.parent().unwrap_or(&target);
+        open_target(&app, &folder.to_string_lossy())
+    }
 }
 
 #[tauri::command]
@@ -8267,10 +8703,16 @@ fn notify_assistant_artifact_focus(
 }
 
 #[tauri::command]
-pub fn cmd_read_text_file(path: String) -> Result<String, String> {
-    let canonical = validate_text_file_path(Path::new(&path))?;
-    let path_str = canonical.to_string_lossy();
-    std::fs::read_to_string(&canonical).map_err(|e| format!("Cannot read {}: {}", path_str, e))
+pub async fn cmd_read_text_file(path: String) -> Result<String, String> {
+    // The open document is re-read on a timer to pick up external edits; a
+    // synchronous command ran that read on the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical = validate_text_file_path(Path::new(&path))?;
+        let path_str = canonical.to_string_lossy();
+        std::fs::read_to_string(&canonical).map_err(|e| format!("Cannot read {}: {}", path_str, e))
+    })
+    .await
+    .map_err(|e| format!("cmd_read_text_file worker failed: {e}"))?
 }
 
 #[tauri::command]
@@ -8320,11 +8762,17 @@ pub fn cmd_recent_artifacts(limit: Option<usize>) -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_list_documents(limit: Option<usize>) -> serde_json::Value {
-    let config = Config::load();
-    let workspace = crate::context::workspace_dir();
-    let views = list_documents_for_roots(&config, &workspace, limit.unwrap_or(200).min(200));
-    serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
+// Async: the Documents view refreshes every 4 s, and each listing stats
+// every candidate file.
+pub async fn cmd_list_documents(limit: Option<usize>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = Config::load();
+        let workspace = crate::context::workspace_dir();
+        let views = list_documents_for_roots(&config, &workspace, limit.unwrap_or(200).min(200));
+        serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
+    })
+    .await
+    .map_err(|e| format!("cmd_list_documents worker failed: {e}"))
 }
 
 #[tauri::command]
@@ -8655,7 +9103,7 @@ pub fn cmd_restart_for_permission(
             "Restart requires confirmation because an assistant session will close.".into(),
         );
     }
-    app.restart();
+    crate::restart_without_destructors(&app);
     #[allow(unreachable_code)]
     Ok(())
 }
@@ -9003,13 +9451,20 @@ pub fn cmd_retry_recovery(
 // Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
 // the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub async fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
-    tauri::async_runtime::spawn_blocking(move || cmd_get_meeting_detail_blocking(path))
+/// `include_related: false` skips the cross-meeting lookups (person profiles
+/// and topic research, each a full authorized corpus pass), so the view can
+/// show the meeting at once and fetch related context in a second call.
+pub async fn cmd_get_meeting_detail(
+    path: String,
+    include_related: Option<bool>,
+) -> Result<MeetingDetail, String> {
+    let include_related = include_related.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || meeting_detail(path, include_related))
         .await
         .map_err(|e| format!("cmd_get_meeting_detail worker failed: {e}"))?
 }
 
-pub fn cmd_get_meeting_detail_blocking(path: String) -> Result<MeetingDetail, String> {
+fn meeting_detail(path: String, include_related: bool) -> Result<MeetingDetail, String> {
     let config = Config::load();
     let meeting_path = std::path::PathBuf::from(&path);
     minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
@@ -9081,7 +9536,17 @@ pub fn cmd_get_meeting_detail_blocking(path: String) -> Result<MeetingDetail, St
         })
         .collect();
 
-    let related = build_related_context(&config, &meeting_path, &frontmatter);
+    let related = if include_related {
+        build_related_context(&config, &meeting_path, &frontmatter)
+    } else {
+        RelatedContextView {
+            related_people: related_people_from(&frontmatter),
+            related_topics: related_topics_from(&frontmatter),
+            related_meetings: Vec::new(),
+            related_commitments: Vec::new(),
+            adjacent_artifacts: Vec::new(),
+        }
+    };
 
     let capture_is_none = matches!(
         frontmatter.capture,
@@ -9096,7 +9561,11 @@ pub fn cmd_get_meeting_detail_blocking(path: String) -> Result<MeetingDetail, St
         status,
         context: frontmatter.context,
         attendees: frontmatter.attendees,
-        calendar_event: frontmatter.calendar_event,
+        // Older files stored the free/busy placeholder ("Busy") as the event.
+        calendar_event: frontmatter
+            .calendar_event
+            .as_deref()
+            .and_then(minutes_core::pipeline::meaningful_calendar_title),
         action_items,
         decisions,
         related_people: related.related_people,
@@ -9588,6 +10057,10 @@ pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
         "transcriptionSetup": {
             "batch": batch_setup,
             "standaloneLive": standalone_live_setup,
+        },
+        "modelSelections": {
+            "dictation": config.dictation.model,
+            "standaloneLive": config.live_transcript.model,
         },
         "hasMeetingsDir": has_meetings_dir,
         "activation": primary_setup.activation.clone(),
@@ -12540,13 +13013,13 @@ pub fn cmd_list_agents() -> serde_json::Value {
 
 #[tauri::command]
 pub fn cmd_terminal_info(state: tauri::State<AppState>, session_id: String) -> TerminalInfo {
-    let title = state
-        .pty_manager
-        .lock()
-        .ok()
+    let manager = state.pty_manager.lock().ok();
+    let title = manager
+        .as_ref()
         .and_then(|manager| manager.session_title(&session_id))
         .unwrap_or_else(|| "Minutes Assistant".into());
-    TerminalInfo { title }
+    let theme_dark = manager.and_then(|manager| manager.session_theme_dark(&session_id));
+    TerminalInfo { title, theme_dark }
 }
 
 // ── Settings commands ─────────────────────────────────────────
@@ -13079,16 +13552,20 @@ pub fn cmd_get_settings() -> serde_json::Value {
     let parakeet_capability =
         minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
     let auto_engine = minutes_core::transcribe::auto_transcription_engine_resolution(&config);
+    let sherpa_selectable =
+        auto_engine.engine == "sherpa" || batch_readiness.resolved_backend == "sherpa";
 
     serde_json::json!({
         "config_path": path.display().to_string(),
         "recording": {
             "device": config.recording.device,
+            "desktop_audio_source": crate::recording_audio::saved_choice(&config).ok().flatten().map(|source| source.as_str()),
         },
         "transcription": {
             "engine": config.transcription.engine,
             "resolved_engine": batch_readiness.resolved_backend,
             "auto_engine_reason": auto_engine.reason,
+            "sherpa_selectable": sherpa_selectable,
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
             "language": config.transcription.language,
@@ -13103,7 +13580,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "parakeet_selectable": parakeet_capability.selectable,
             "parakeet_unavailable_reason": parakeet_capability.unavailable_reason(),
             "parakeet_status": parakeet_status_view(&config),
-            "apple_speech_status": apple_speech_status_view(),
+            "apple_speech_status": apple_speech_status_view_for(&config),
         },
         "diarization": {
             "engine": config.diarization.engine,
@@ -13158,6 +13635,12 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "hooks": {
             "post_record": config.hooks.post_record,
         },
+        "calendar": {
+            "enabled": config.calendar.enabled,
+            "require_attendees_or_url": config.calendar.require_attendees_or_url,
+            "ignore_title_contains": config.calendar.ignore_title_contains,
+            "ignore_calendars": config.calendar.ignore_calendars,
+        },
         "call_detection": {
             "enabled": config.call_detection.enabled,
             "poll_interval_secs": config.call_detection.poll_interval_secs,
@@ -13172,6 +13655,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "dictation": {
             "backend": config.dictation.backend,
+            "sherpa_available": minutes_core::dictation::sherpa_dictation_available(&config),
+            "auto_uses_parakeet": minutes_core::dictation::auto_dictation_uses_parakeet(&config),
             "model": config.dictation.model,
             "destination": config.dictation.destination,
             "accumulate": config.dictation.accumulate,
@@ -13398,6 +13883,44 @@ fn reject_unselectable_apple_speech(value: &str, setting: &str) -> Result<(), St
     ))
 }
 
+/// Standalone live transcript is the one surface Apple Speech may be chosen
+/// for, and only when this signed app can reach the worker and the Speech
+/// runtime can transcribe.
+fn reject_unselectable_live_apple_speech(value: &str) -> Result<(), String> {
+    if !value.eq_ignore_ascii_case("apple-speech") {
+        return Ok(());
+    }
+    let status = apple_speech_status_view();
+    if status["selectable"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    let reason = status["unavailable_reason"]
+        .as_str()
+        .unwrap_or(minutes_core::pipeline::apple_speech_unavailable_reason());
+    Err(format!(
+        "Apple Speech cannot be selected as the live transcript backend: {reason}. Use Whisper; an existing Apple Speech preference is retained but resolves to Whisper."
+    ))
+}
+
+/// Parse a JSON array of calendar filter entries: trimmed, non-empty, and
+/// deduplicated case-insensitively (the filters match case-insensitively).
+fn calendar_filter_list(key: &str, value: &str) -> Result<Vec<String>, String> {
+    let entries: Vec<String> = serde_json::from_str(value)
+        .map_err(|_| format!("{key} must be a JSON array of strings"))?;
+    let mut cleaned: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim().to_string();
+        if !entry.is_empty()
+            && !cleaned
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&entry))
+        {
+            cleaned.push(entry);
+        }
+    }
+    Ok(cleaned)
+}
+
 #[tauri::command]
 pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<String, String> {
     let mut config = Config::load();
@@ -13448,6 +13971,13 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("recording", "device") => {
             config.recording.device =
                 minutes_core::capture::canonicalize_input_device_setting(&value);
+            if let Some(sources) = config.recording.sources.as_mut() {
+                sources.voice = config.recording.device.clone();
+            }
+        }
+        ("recording", "desktop_audio_source") => {
+            let source = crate::recording_audio::AudioSource::parse(&value)?;
+            config.recording.desktop_audio_source = Some(source.as_str().into());
         }
 
         // Consent
@@ -13555,6 +14085,17 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                 .parse::<bool>()
                 .map_err(|_| "auto_record must be true or false")?;
         }
+        ("calendar", "require_attendees_or_url") => {
+            config.calendar.require_attendees_or_url = value
+                .parse::<bool>()
+                .map_err(|_| "require_attendees_or_url must be true or false")?;
+        }
+        ("calendar", "ignore_title_contains") => {
+            config.calendar.ignore_title_contains = calendar_filter_list(&key, &value)?;
+        }
+        ("calendar", "ignore_calendars") => {
+            config.calendar.ignore_calendars = calendar_filter_list(&key, &value)?;
+        }
         ("call_detection", "auto_record_apps") => {
             let names: Vec<String> = serde_json::from_str(&value)
                 .map_err(|_| "auto_record_apps must be a JSON array")?;
@@ -13586,15 +14127,40 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
 
         // Dictation
         ("dictation", "backend") => {
-            if !["whisper", "apple-speech", "parakeet"].contains(&value.as_str()) {
+            if !["auto", "whisper", "sherpa", "apple-speech", "parakeet"].contains(&value.as_str())
+            {
                 return Err(format!(
-                    "unknown dictation backend '{}'. Valid: whisper, apple-speech, parakeet",
+                    "unknown dictation backend '{}'. Valid: auto, whisper, sherpa, apple-speech, parakeet",
                     value
                 ));
             }
             reject_unselectable_apple_speech(&value, "dictation backend")?;
             reject_unselectable_parakeet(&value, "dictation backend")?;
+            if value == "sherpa" && !minutes_core::dictation::sherpa_dictation_available(&config) {
+                return Err(
+                    "Parakeet v3 is not installed, so it cannot write dictation text yet. Run `minutes setup --sherpa`, or keep Whisper.".into(),
+                );
+            }
             config.dictation.backend = value.clone();
+            // A choice made here is deliberate; the one-time move from the old
+            // whisper default must never overrule it.
+            config.dictation.auto_engine_migrated = true;
+            if value == "sherpa"
+                || (value == "auto"
+                    && minutes_core::dictation::auto_dictation_uses_parakeet(&config))
+            {
+                // Load the recognizer now so the first dictation does not wait.
+                let preload_config = config.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = minutes_core::dictation::preload_model(&preload_config) {
+                        eprintln!("[dictation] model re-preload failed: {}", e);
+                    }
+                });
+            } else {
+                // Free Parakeet v3's memory once dictation no longer uses it. Off
+                // this thread: release waits for any decode holding the recognizer.
+                std::thread::spawn(minutes_core::dictation::release_sherpa_dictation_recognizer);
+            }
         }
         ("dictation", "model") => {
             config.dictation.model = value.clone();
@@ -13643,7 +14209,7 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                     VALID_LIVE_TRANSCRIPT_BACKENDS.join(", ")
                 ));
             }
-            reject_unselectable_apple_speech(&value, "live transcript backend")?;
+            reject_unselectable_live_apple_speech(&value)?;
             reject_unselectable_parakeet(&value, "live transcript backend")?;
             config.live_transcript.backend = value.clone();
         }
@@ -14717,6 +15283,7 @@ mod tests {
         commitments: &[&str],
     ) -> String {
         let summary = minutes_core::summarize::Summary {
+            title: None,
             text: String::new(),
             decisions: Vec::new(),
             action_items: Vec::new(),
@@ -15557,6 +16124,8 @@ mod tests {
             "Transcript current",
             "Last transcript update",
             "Recording safely · Live transcript unavailable",
+            "Recording · Live transcript off",
+            "disabled: recordingLive.disabled",
         ] {
             assert!(html.contains(expected), "missing live state: {expected}");
         }
@@ -17659,6 +18228,16 @@ mod tests {
     }
 
     #[test]
+    fn desktop_settings_reject_sherpa_dictation_without_its_model() {
+        // The temp home has no Parakeet v3 model installed.
+        with_temp_home(|_| {
+            let error =
+                cmd_set_setting("dictation".into(), "backend".into(), "sherpa".into()).unwrap_err();
+            assert!(error.contains("Parakeet v3 is not installed"));
+        });
+    }
+
+    #[test]
     fn desktop_settings_reject_unknown_dictation_backend() {
         with_temp_home(|_| {
             let error =
@@ -17680,6 +18259,67 @@ mod tests {
 
             let config = Config::load();
             assert_eq!(config.recording.device.as_deref(), Some("Ground Control"));
+        });
+    }
+
+    #[test]
+    fn desktop_audio_choice_preserves_existing_source_and_model_preferences() {
+        with_temp_home(|_| {
+            let path = Config::config_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = "# Keep my settings\n[transcription]\nmodel = \"medium\"\n[recording]\ncapture_backend = \"core-audio-tap\"\n[recording.sources]\nvoice = \"Studio Mic\"\ncall = \"auto\"\n[future_settings]\nkeep = true\n";
+            std::fs::write(&path, original).unwrap();
+            cmd_set_setting(
+                "recording".into(),
+                "desktop_audio_source".into(),
+                "microphone".into(),
+            )
+            .unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            for line in original.lines() {
+                assert!(
+                    saved.lines().any(|saved_line| saved_line == line),
+                    "lost {line}"
+                );
+            }
+            let config = Config::load_strict().unwrap();
+            assert_eq!(config.transcription.model, "medium");
+            assert_eq!(
+                config.recording.desktop_audio_source.as_deref(),
+                Some("microphone")
+            );
+            assert_eq!(
+                config.recording.sources.unwrap().call.as_deref(),
+                Some("auto")
+            );
+            assert!(cmd_set_setting(
+                "recording".into(),
+                "desktop_audio_source".into(),
+                "unknown".into()
+            )
+            .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        });
+    }
+
+    #[test]
+    fn desktop_microphone_picker_updates_an_existing_dual_voice_source() {
+        with_temp_home(|_| {
+            let mut config = Config::default();
+            config.recording.sources = Some(minutes_core::config::SourcesConfig {
+                voice: Some("Old USB Mic".into()),
+                call: Some("BlackHole 2ch".into()),
+            });
+            config.save().unwrap();
+            cmd_set_setting(
+                "recording".into(),
+                "device".into(),
+                "Studio Mic (16000Hz, 1 ch)".into(),
+            )
+            .unwrap();
+            let sources = Config::load_strict().unwrap().recording.sources.unwrap();
+            assert_eq!(sources.voice.as_deref(), Some("Studio Mic"));
+            assert_eq!(sources.call.as_deref(), Some("BlackHole 2ch"));
         });
     }
 
@@ -17731,6 +18371,29 @@ mod tests {
     }
 
     #[test]
+    fn live_apple_speech_selection_requires_the_signed_transport() {
+        // Unit tests never run inside a trusted signed bundle, so the transport
+        // gate is closed and the live backend setter must refuse Apple Speech.
+        assert!(!minutes_core::pipeline::apple_speech_private_audio_transport_supported());
+        let error = reject_unselectable_live_apple_speech("apple-speech").unwrap_err();
+        assert!(error.contains("live transcript backend"));
+        assert!(error.contains("secure private audio"));
+        assert!(reject_unselectable_live_apple_speech("whisper").is_ok());
+        assert_eq!(apple_speech_status_view()["selectable"], false);
+    }
+
+    #[test]
+    fn apple_speech_status_reports_a_missing_whisper_fallback() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.model_path = dir.path().to_path_buf();
+        let status = apple_speech_status_view_for(&config);
+        assert_eq!(status["fallback_ready"], false);
+        assert_eq!(status["selectable"], false);
+        assert!(status["unavailable_reason"].is_string());
+    }
+
+    #[test]
     fn retained_live_apple_speech_resolves_to_sealed_whisper() {
         let dir = TempDir::new().unwrap();
         let mut config = Config::default();
@@ -17755,6 +18418,36 @@ mod tests {
         assert!(status["unavailable_reason"]
             .as_str()
             .is_some_and(|reason| reason.contains("secure private audio")));
+    }
+
+    #[test]
+    fn uninstalled_sherpa_reports_its_whisper_fallback() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.transcription.sherpa_model_dir = dir.path().join("no-sherpa").display().to_string();
+
+        let readiness = batch_transcription_readiness_view(&config);
+
+        assert_eq!(readiness.configured_backend, "sherpa");
+        assert_eq!(readiness.resolved_backend, "whisper");
+        assert_eq!(readiness.next_action, "download-model");
+    }
+
+    #[test]
+    fn settings_engine_select_offers_sherpa_and_hides_retired_parakeet() {
+        let html = include_str!("../../src/index.html");
+        assert!(
+            html.contains(r#"<option value="sherpa" disabled>Parakeet v3 — unavailable</option>"#)
+        );
+        assert!(html.contains(
+            "setSettingsOptionPresent(engineSelect, sherpaOpt, sherpaSelectable || eng === 'sherpa'"
+        ));
+        assert!(html.contains(
+            "setSettingsOptionPresent(engineSelect, parakeetOpt, parakeetSelectable || eng === 'parakeet'"
+        ));
+        assert!(html.contains("case 'sherpa': return 'Parakeet v3';"));
     }
 
     #[test]
@@ -17875,6 +18568,54 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn restore_archived_meeting_puts_every_file_back() {
+        let dir = TempDir::new().unwrap();
+        let archive_dir = dir.path().join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let md = dir.path().join("2026-04-01-undo.md");
+        std::fs::write(&md, "---\ntitle: Undo\n---\n").unwrap();
+        let artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md);
+        for path in &artifacts {
+            std::fs::write(path, "artifact").unwrap();
+        }
+
+        let moves = archive_meeting_artifacts(&md, &archive_dir, &artifacts, true).unwrap();
+        assert_eq!(moves.len(), 1 + artifacts.len());
+        restore_archived_meeting(dir.path(), &moves).unwrap();
+
+        assert!(md.exists());
+        for path in &artifacts {
+            assert!(path.exists(), "{} should be restored", path.display());
+        }
+        assert_eq!(std::fs::read_dir(&archive_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn restore_archived_meeting_refuses_to_overwrite_or_escape() {
+        let dir = TempDir::new().unwrap();
+        let archive_dir = dir.path().join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let md = dir.path().join("2026-04-01-taken.md");
+        std::fs::write(&md, "original").unwrap();
+        let moves = archive_meeting_artifacts(&md, &archive_dir, &[], false).unwrap();
+
+        // A new file now occupies the original path: Undo must not clobber it.
+        std::fs::write(&md, "newer").unwrap();
+        assert!(restore_archived_meeting(dir.path(), &moves).is_err());
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), "newer");
+        std::fs::remove_file(&md).unwrap();
+
+        // A receipt pointing outside the meetings folder is rejected.
+        let elsewhere = TempDir::new().unwrap();
+        let forged = vec![ArchivedFileMove {
+            from: elsewhere.path().join("escaped.md"),
+            to: moves[0].to.clone(),
+        }];
+        assert!(restore_archived_meeting(dir.path(), &forged).is_err());
+        assert!(moves[0].to.exists());
     }
 
     #[test]
@@ -18464,6 +19205,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),
+            spelling_corrections: Vec::new(),
             speaker_mapping: None,
             summarization: None,
             template: None,
@@ -18546,6 +19288,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),
+            spelling_corrections: Vec::new(),
             speaker_mapping: None,
             summarization: None,
             template: None,
@@ -18603,6 +19346,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),
+            spelling_corrections: Vec::new(),
             speaker_mapping: None,
             summarization: None,
             template: None,
@@ -18782,6 +19526,12 @@ mod tests {
             .related_topics
             .iter()
             .any(|topic| topic == "pricing strategy"));
+    }
+
+    #[test]
+    fn weekly_dates_read_as_days() {
+        assert_eq!(weekly_date_label("2026-10-24T22:33:34-04:00"), "Sat Oct 24");
+        assert_eq!(weekly_date_label("not a date"), "not a date");
     }
 
     #[test]
@@ -20155,9 +20905,7 @@ mod tests {
             )
             .unwrap();
 
-            let detail =
-                cmd_get_meeting_detail_blocking(meeting_path.to_string_lossy().to_string())
-                    .unwrap();
+            let detail = meeting_detail(meeting_path.to_string_lossy().to_string(), true).unwrap();
 
             let alex = detail
                 .speaker_map
@@ -21453,6 +22201,14 @@ pub fn cmd_start_copilot_surface(
     if provider == "cloud" && !config.copilot.allow_cloud {
         return Err("Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into());
     }
+    // The surface reads `live.utterance.final` events, which only a sidecar
+    // emits; a recording with it off would leave Coach arming forever.
+    if minutes_core::live_transcript::session_status()
+        .disabled
+        .is_some()
+    {
+        return Err(minutes_core::copilot::RECORDING_WITHOUT_LIVE_TEXT.into());
+    }
 
     if state
         .copilot_active
@@ -22106,7 +22862,10 @@ pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::Value {
+// Async: polled with capture status, off the main thread.
+pub async fn cmd_live_transcript_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let in_app_active = state.live_transcript_active.load(Ordering::Relaxed);
     let status = minutes_core::live_transcript::session_status();
     let audio_level = if in_app_active {
@@ -22122,7 +22881,7 @@ pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::
         &minutes_core::copilot::current_window_environment(),
         Config::load().privacy.hide_from_screen_share,
     );
-    serde_json::json!({
+    Ok(serde_json::json!({
         "active": in_app_active || status.active,
         "line_count": status.line_count,
         "duration_secs": status.duration_secs,
@@ -22131,7 +22890,7 @@ pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::
         "source": status.source,
         "diagnostic": status.diagnostic,
         "copilotWindowContract": copilot_window_contract,
-    })
+    }))
 }
 
 /// Update the assistant instruction files to mention (or un-mention)
@@ -23987,7 +24746,7 @@ pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Val
             );
             eprintln!("[updater] v{} installed, restarting", version);
             std::thread::sleep(Duration::from_millis(700));
-            app_handle.restart();
+            crate::restart_without_destructors(&app_handle);
             #[allow(unreachable_code)]
             Ok::<(), UpdateInstallError>(())
         }

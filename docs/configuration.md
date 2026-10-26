@@ -2,19 +2,46 @@
 
 Optional — minutes works out of the box.
 
+In the desktop app, choose **Meeting audio** before the first Meeting recording:
+**Microphone only** for a room, or **Microphone + system audio** for a computer
+call. The choice is remembered and works without call detection. Memos use the
+microphone. Native desktop call capture requires macOS 15+, Microphone access
+and Screen Recording access; a failed two-source start does not fall back to
+microphone-only recording.
+
+For CLI system capture on macOS 14.4+, configure **both**
+`recording.capture_backend = "core-audio-tap"` and
+`recording.sources.call = "auto"`, then run `minutes record --call`.
+Process Tap captures the default system output and uses macOS system-audio
+access. It is separate from the desktop ScreenCaptureKit helper. See the
+[audio setup guide](architecture/audio-devices.md) for permissions and loopback
+alternatives.
+
 ```toml
 # By default: ~/.config/minutes/config.toml
 # Or: $XDG_CONFIG_HOME/minutes/config.toml when XDG_CONFIG_HOME is set
+
+[recording]
+# Desktop preference; does not change CLI source routing:
+# desktop_audio_source = "microphone-and-system" # Or "microphone"
+# Optional CLI system capture on macOS 14.4+; BOTH this and sources.call are needed:
+# capture_backend = "core-audio-tap"
+
+[recording.sources]
+# voice = "default"
+# call = "auto"          # Core Audio Process Tap, or auto-detect a CPAL loopback
 
 [transcription]
 engine = "auto"           # Apple Silicon release builds use Parakeet v3 when installed, otherwise Whisper
 # engine = "whisper"      # Keep Whisper explicitly on every platform
 # engine = "sherpa"       # Select the in-process Parakeet v3 engine explicitly
-model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
+model = "small"           # Whisper meeting baseline: small (466MB); base, medium, large-v3 also supported
+                          # tiny (75MB) is an explicit advanced low-resource choice with lower accuracy
 # language = "ur"          # Force transcription language (ISO 639-1 code, e.g. "en", "ur", "es", "zh")
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
-# engine = "apple-speech"  # Retained for compatibility; currently resolves to Whisper until signed runtime acceptance passes.
-#                          # See docs/architecture/apple-speech.md for the candidate byte-transport boundary.
+# engine = "apple-speech"  # Batch transcription still resolves to Whisper. Standalone live transcript can use
+#                          # Apple Speech in the signed app on macOS 26+: set [live_transcript] backend = "apple-speech".
+#                          # See docs/architecture/apple-speech.md.
 # engine = "parakeet"      # Retained for compatibility, but currently resolves to Whisper until secure byte transport lands.
 # parakeet_model = "tdt-600m"                    # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
 # parakeet_binary = "parakeet"                   # Path to parakeet.cpp binary (or name in PATH)
@@ -176,3 +203,28 @@ Images are never attached to every prompt automatically, and an assistant
 should only claim it can see the screen after it has opened or received a
 specific returned image. Unless `keep_after_summary = true`, Minutes deletes
 the PNGs and their readable references after summarization.
+
+## Installing models without changing your preferences
+
+`minutes setup` keeps your configured meeting model (Small by default), installs
+the selected Live/dictation models (Base by default), and preserves all model and
+engine selections. On supported Apple Silicon builds with the sherpa plugin, it
+also installs Parakeet for the Auto engine.
+
+To install a companion model without selecting it for every meeting:
+
+```bash
+minutes setup --model base --download-only
+```
+
+An explicit `minutes setup --model small` installs and selects Small for Whisper
+meeting transcription. It does not change the separate dictation or Live model.
+The command explains the selection before installation.
+
+Tiny remains available through `--model tiny` or the advanced model options.
+Minutes does not select it as an automatic fallback. Existing Tiny preferences
+are preserved; choose a larger model explicitly to upgrade.
+
+Background MCP model installation uses `--download-only`. If an older CLI does
+not support that flag, update Minutes; the MCP server will not retry with a
+command that changes your preferences.

@@ -67,6 +67,8 @@ jobs:
               # so `cargo clippy --all` never reaches it and only the filter
               # keeps it covered.
               - 'crates/sherpa-plugin/**'
+              # Also excluded from the workspace (it compiles a pinned llama.cpp).
+              - 'crates/embed-worker/**'
               - 'crates/archive-convert/**'
               - 'crates/archive-core/**'
               - 'crates/archive-ocr/**'
@@ -248,6 +250,11 @@ jobs:
         # otherwise only surfaces at release, and exercises Linux beyond no-default-features.
         run: cargo build -p minutes-core --no-default-features --features engine-sherpa
 
+      - name: Sherpa meeting model lifetime and fallback
+        if: runner.os != 'Windows'
+        # Compiles a tiny deterministic ABI fixture, with no model download.
+        run: cargo test -p minutes-core --no-default-features --features engine-sherpa --test sherpa_meeting_reuse -- --test-threads=1
+
       - name: Sherpa and diarize share one binary (#685)
         # The inverse of the guard this replaces. #683 proved the two stacks
         # cannot be statically linked together; the plugin moved sherpa behind
@@ -275,6 +282,16 @@ jobs:
         run: |
           # Both: `cargo test` compiles the lib as a test harness and never
           # emits the cdylib, so the export check below would find nothing.
+          cargo build --release --locked
+          cargo test --release --locked
+
+      - name: Build and test the semantic embedding worker
+        # Excluded from the workspace, so only this step reaches it. On macOS
+        # this compiles the pinned llama.cpp (Metal); elsewhere the worker is a
+        # stub and only its request/prompt tests run.
+        working-directory: crates/embed-worker
+        shell: bash
+        run: |
           cargo build --release --locked
           cargo test --release --locked
 
@@ -337,6 +354,23 @@ jobs:
 
       - name: Copilot CLI contract tests
         run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI transcription renderer contracts
+        # Core attribution tests do not execute this independent CLI renderer.
+        # Exercise both formats, overlap/turn-crossing abstention, and absent
+        # evidence with deterministic injected results and no audio device.
+        run: cargo test -p minutes-cli --no-default-features -- transcribe_ --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI voice-enrollment contracts
+        run: cargo test -p minutes-cli --no-default-features -- enrollment_ --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI model-setup preferences
+        run: |
+          cargo test -p minutes-cli --no-default-features --bin minutes -- setup_ --test-threads=1
+          cargo test -p minutes-cli --no-default-features --test model_setup_preferences -- --test-threads=1
         timeout-minutes: 4
 
       - name: Diarization unit tests (cross-platform)
@@ -954,9 +988,14 @@ jobs:
       - name: Test design-token checker
         run: node --test scripts/check_design_tokens.test.mjs
 
+      - name: Test stored update offer restoration
+        run: node scripts/test_update_offer.mjs
+
       - name: Test shipped dictation controllers
         run: |
           node scripts/test_dictation_readiness.mjs
+          node scripts/test_model_setup.mjs
+          node --test scripts/test_recording_audio.mjs
           node scripts/test_dictation_overlay.mjs
           node scripts/test_dictation_history.mjs
 
@@ -1112,10 +1151,50 @@ jobs:
   # was CANCELLED. A `skipped` result (the path filter doing its job) passes the
   # gate. So: required Rust jobs that ran must be green; required jobs the filter
   # correctly skipped do not block. Point branch protection at "CI Gate" alone.
+  sherpa_macos_packaging:
+    name: Sherpa relocation (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/sherpa-plugin -> target
+      - name: Build both client generations and verify relocated signed plugins
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
+          export CXXFLAGS
+          (cd crates/sherpa-plugin && cargo build --release --locked)
+          (cd crates/sherpa-plugin && cargo build --release --locked --features legacy-static --target-dir target/legacy-static)
+          relocated="$RUNNER_TEMP/sherpa-relocated"
+          mkdir -p "$relocated/shared" "$relocated/legacy"
+          for lib in libminutes_sherpa.dylib libsherpa-onnx-c-api.dylib libonnxruntime.dylib; do
+            cp -f "crates/sherpa-plugin/target/release/$lib" "$relocated/shared/$lib"
+            codesign --force --options runtime --sign - "$relocated/shared/$lib"
+            codesign --verify --strict "$relocated/shared/$lib"
+          done
+          cp -f crates/sherpa-plugin/target/legacy-static/release/libminutes_sherpa.dylib "$relocated/legacy/"
+          codesign --force --options runtime --sign - "$relocated/legacy/libminutes_sherpa.dylib"
+          for layout in shared legacy; do
+            (cd /tmp && python3 "$GITHUB_WORKSPACE/scripts/verify_sherpa_plugin_loads.py" "$relocated/$layout/libminutes_sherpa.dylib")
+          done
+
   ci_gate:
     name: CI Gate
     needs:
       - changes
+      - sherpa_macos_packaging
       - test
       - install
       - linux_full_build

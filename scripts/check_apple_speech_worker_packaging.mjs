@@ -7,14 +7,14 @@ import { readFileSync } from "node:fs";
 // Structural matches below are necessary but these goldens ensure a copied
 // comment or dead duplicate cannot silently replace the active boundary.
 const EXPECTED_SOURCE_SHA256 = {
-  worker: "39987e79c576507f5e442d73e99628a5e24485b56a6763fe3c2f3e21bf58e63d",
+  worker: "b6aed9092e0d34194a4b252b036f092d5adafc0821a583a6ef876f83d45a153c",
   xpc: "bfe9dfc1f015e6825adc02212305af52efe0f2faeff0d79c736cdce4e4c4d2aa",
   swift: "77310730cfa46ac8301c1a65622681005ebf00f0c699f24fdca757e2e02fcef4",
-  main: "7d6a296f5cbb0b72d7276d866fcf13e8efd6923306f518b4ced090d92965991f",
+  main: "de664ee796e1cf8d9bda3ab8d00e6a4714778904dfa1d5577c05425d767d983f",
   acceptanceWorkflow:
     "16340f6b0a1aa4002e3c9f449c40b7212f4122f94a57c4174a58f756f671a217",
   acceptanceHarness:
-    "bcb7900e80cff2446d66aaae0937e779552ea77f6cb555cf158e5016d936d43d",
+    "96be9128ec39a91aae7f44895ad709cff21c762ce6102034315713ee7837f56a",
 };
 
 const files = {
@@ -441,7 +441,9 @@ function validate(candidate, checkGoldens = true) {
     "apple-speech-signed-runtime=accepted",
     "signedWorkerRuntime",
     "namedAudioCanaryObserved",
-    "productGateExpectedClosed",
+    "liveProductGateOpen",
+    "apple-speech-live-product-gate=open",
+    "apple-speech-dictation-product-gate=closed",
   ]) {
     requireText(
       candidate.acceptanceHarness,

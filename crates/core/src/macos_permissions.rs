@@ -167,6 +167,32 @@ pub fn microphone_status() -> MacPermissionStatus {
     platform::microphone_status()
 }
 
+/// How an explicit microphone-permission request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneRequestOutcome {
+    Granted,
+    Denied,
+    /// No answer within the timeout: the prompt may be hidden or never shown.
+    TimedOut,
+    /// `cancel` was set while waiting (Escape).
+    Cancelled,
+}
+
+/// Ask macOS for microphone access when it has not been decided yet, waiting
+/// at most `timeout` and returning early when `cancel` is set.
+///
+/// Opening an input device while the decision is pending makes CoreAudio's
+/// `AudioDeviceStart` wait for it. When macOS does not show its prompt (seen
+/// after a dev app's signature changed) that wait never ends and cannot be
+/// cancelled. An explicit request is the documented way to show the prompt,
+/// and waiting on it here keeps Escape and a timeout in the caller's hands.
+pub fn request_microphone_access(
+    cancel: &dyn Fn() -> bool,
+    timeout: std::time::Duration,
+) -> MicrophoneRequestOutcome {
+    platform::request_microphone_access(cancel, timeout)
+}
+
 pub fn screen_recording_status() -> MacPermissionStatus {
     platform::screen_recording_status()
 }
@@ -377,6 +403,42 @@ mod platform {
         }
     }
 
+    pub fn request_microphone_access(
+        cancel: &dyn Fn() -> bool,
+        timeout: Duration,
+    ) -> super::MicrophoneRequestOutcome {
+        use super::MicrophoneRequestOutcome;
+        let Some(media_type) = (unsafe { AVMediaTypeAudio }) else {
+            return MicrophoneRequestOutcome::Denied;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let handler = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
+            let _ = tx.send(granted.as_bool());
+        });
+        // SAFETY: the completion handler may run on any queue; it only sends
+        // on a channel. The block is retained by AVFoundation until it runs.
+        unsafe {
+            AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &handler)
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(true) => return MicrophoneRequestOutcome::Granted,
+                Ok(false) => return MicrophoneRequestOutcome::Denied,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return MicrophoneRequestOutcome::Denied
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if cancel() {
+                return MicrophoneRequestOutcome::Cancelled;
+            }
+            if started.elapsed() >= timeout {
+                return MicrophoneRequestOutcome::TimedOut;
+            }
+        }
+    }
+
     pub fn screen_recording_status() -> MacPermissionStatus {
         if unsafe { CGPreflightScreenCaptureAccess() } {
             MacPermissionStatus::Granted
@@ -446,6 +508,13 @@ mod platform {
 
     pub fn microphone_status() -> MacPermissionStatus {
         MacPermissionStatus::NotNeeded
+    }
+
+    pub fn request_microphone_access(
+        _cancel: &dyn Fn() -> bool,
+        _timeout: std::time::Duration,
+    ) -> super::MicrophoneRequestOutcome {
+        super::MicrophoneRequestOutcome::Granted
     }
 
     pub fn screen_recording_status() -> MacPermissionStatus {

@@ -32,6 +32,51 @@ pub enum StopReason {
     Silence,
     TimeCapReached,
     DiskSpaceLow,
+    StemSizeLimit,
+}
+
+/// Largest file a RIFF/WAVE header can describe: chunk sizes are u32.
+pub const WAV_STEM_BYTE_LIMIT: u64 = u32::MAX as u64;
+
+/// Headroom kept below [`WAV_STEM_BYTE_LIMIT`] when stopping, so stop
+/// latency and the helper's final flush cannot cross it. 64 MiB is about
+/// 2.9 minutes of the fastest stem format we write (96 kHz mono f32).
+const STEM_STOP_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Stops native call capture before a stem outgrows its WAV header (#1219).
+///
+/// Native stems are mono f32 at the device rate, so a time cap cannot stand
+/// in for a size cap: at 48 kHz the 4 GB limit arrives after ~6.2 h (below
+/// the 8 h default `max_duration_secs`), at 96 kHz after ~3.1 h. Past it the
+/// capture needs a manual `minutes recover-stem`. Warns at 90%, stops at the
+/// limit minus headroom, and lets normal finalization process the capture.
+#[derive(Debug, Default)]
+pub struct StemSizeGuard {
+    warned: bool,
+}
+
+impl StemSizeGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn check(&mut self, largest_stem_bytes: u64) -> SafetyAction {
+        let stop_at = WAV_STEM_BYTE_LIMIT - STEM_STOP_HEADROOM_BYTES;
+        if largest_stem_bytes >= stop_at {
+            return SafetyAction::Stop(
+                StopReason::StemSizeLimit,
+                "Call audio reached the 4 GB WAV file limit. Auto-stopped and processing.".into(),
+            );
+        }
+        if !self.warned && largest_stem_bytes >= stop_at / 10 * 9 {
+            self.warned = true;
+            return SafetyAction::Warning(
+                "Call audio is nearing the 4 GB WAV file limit; the recording will auto-stop soon."
+                    .into(),
+            );
+        }
+        SafetyAction::None
+    }
 }
 
 /// Action the caller should take after a safety check.
@@ -1196,6 +1241,26 @@ fn wav_spec_16k_mono() -> hound::WavSpec {
     }
 }
 
+/// Size of the canonical 16-bit PCM WAV header that `hound` writes on creation.
+const WAV_HEADER_LEN: u64 = 44;
+
+/// True for a leftover from a capture that never recorded a sample. It holds
+/// no audio, so reusing it cannot destroy a recording.
+fn is_header_only_wav(file: &std::fs::File) -> bool {
+    use std::io::{Seek, SeekFrom};
+    let is_header_sized = file
+        .metadata()
+        .map(|m| m.len() == WAV_HEADER_LEN)
+        .unwrap_or(false);
+    if !is_header_sized || (&*file).seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    let is_empty = hound::WavReader::new(std::io::BufReader::new(file))
+        .map(|reader| reader.len() == 0)
+        .unwrap_or(false);
+    is_empty && (&*file).seek(SeekFrom::Start(0)).is_ok()
+}
+
 fn create_wav_writer(
     output_path: &Path,
 ) -> Result<hound::WavWriter<std::io::BufWriter<std::fs::File>>, CaptureError> {
@@ -1221,7 +1286,7 @@ fn create_wav_writer(
             // Never truncate an earlier capture or follow a planted link.
             let existing = directory.bind_exact_file(name)?;
             let file = existing.try_clone_exact_file()?;
-            if file.metadata()?.len() != 0 {
+            if file.metadata()?.len() != 0 && !is_header_only_wav(&file) {
                 return Err(CaptureError::Io(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "refusing to overwrite an existing recording",
@@ -1244,7 +1309,7 @@ fn create_wav_writer(
         Err(error) => return Err(error.into()),
     };
     fs2::FileExt::try_lock_exclusive(&file)?;
-    if file.metadata()?.len() != 0 {
+    if file.metadata()?.len() != 0 && !is_header_only_wav(&file) {
         return Err(CaptureError::Io(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "recording reservation is no longer empty",
@@ -1265,8 +1330,18 @@ fn create_wav_writer(
             "recording destination changed during creation",
         )));
     }
-    // Permissions and identity are established before hound writes even its
-    // header. Retain the exact file; no pathname reopen occurs during capture.
+    // Reusing an empty header is a write too. Establish permissions and exact
+    // identity before truncating, including the Windows owner-only DACL check.
+    if is_header_only_wav(&file) {
+        file.set_len(0)?;
+    }
+    if file.metadata()?.len() != 0 {
+        return Err(CaptureError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "recording reservation is no longer empty",
+        )));
+    }
+    // Retain the exact file; no pathname reopen occurs during capture.
     hound::WavWriter::new(std::io::BufWriter::new(file), wav_spec_16k_mono())
         .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV create: {}", e))))
 }
@@ -1920,6 +1995,9 @@ fn record_to_wav_dual_source(
     if let Some(handle) = sidecar_handle {
         handle.join().ok();
     }
+    // The disabled state has no sidecar thread to clear it; mirror the single-source path.
+    #[cfg(feature = "whisper")]
+    crate::live_transcript::clear_status_file();
 
     eprintln!(
         "[minutes] Captured {} mixed samples ({:.1}s), peak audio level: {}",
@@ -1996,8 +2074,11 @@ pub fn record_to_wav_with_lifecycle(
     // producer is bounded and optional; relay failure disables drafts without
     // changing capture or the durable transcript path.
     let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
+    // No sidecar means no partial producer, so the relay advertises final-only evidence.
     let (mut recording_partial_publisher, recording_partial_subscriber) =
-        if cfg!(all(feature = "whisper", feature = "streaming")) {
+        if cfg!(all(feature = "whisper", feature = "streaming"))
+            && config.live_transcript.recording_sidecar
+        {
             let (publisher, subscriber) = crate::live_partials::channel_with_source(
                 relay_epoch,
                 crate::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
@@ -2493,6 +2574,22 @@ pub(crate) fn start_live_sidecar(
     Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
     Option<std::thread::JoinHandle<()>>,
 ) {
+    if !config.live_transcript.recording_sidecar {
+        // Every recording path comes through here. Without a sender the pump
+        // never forwards audio, and no thread writes live status, so readers
+        // get the explicit disabled state instead of "failed to start".
+        crate::logging::log_step(
+            "live_sidecar_skipped",
+            "",
+            0,
+            serde_json::json!({ "reason": "live_transcript.recording_sidecar = false" }),
+        );
+        tracing::info!(
+            "live transcript sidecar is off (live_transcript.recording_sidecar = false); recording audio only"
+        );
+        crate::live_transcript::mark_recording_sidecar_disabled();
+        return (None, None);
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
     let sidecar_config = config.clone();
     let sidecar_stop = stop_flag.clone();
@@ -3419,6 +3516,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wav_bytes_are_identical_with_and_without_a_live_sidecar_sender() {
+        use std::sync::atomic::AtomicU64;
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<f32> = (0..48_000)
+            .map(|i| ((i as f32) * 0.01).sin() * 0.5)
+            .collect();
+
+        let record = |name: &str, live_tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>>| {
+            let path = dir.path().join(name);
+            let count = Arc::new(AtomicU64::new(0));
+            let failed = Arc::new(AtomicBool::new(false));
+            let mut pump = CaptureWriterPump::start(
+                create_wav_writer(&path).unwrap(),
+                Arc::clone(&count),
+                Arc::clone(&failed),
+                live_tx,
+            );
+            pump.queue.push_samples(&samples);
+            // This checks WAV integrity, not stop latency. Hosted Windows file
+            // finalization can exceed the production two-second stop budget.
+            // The blocked-writer tests below exercise that deadline separately.
+            pump.finish_with_timeout(std::time::Duration::from_secs(15))
+                .unwrap();
+            assert!(!failed.load(Ordering::Acquire));
+            assert_eq!(count.load(Ordering::Relaxed), samples.len() as u64);
+            std::fs::read(path).unwrap()
+        };
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
+        let drain = std::thread::spawn(move || rx.iter().map(|chunk| chunk.len()).sum::<usize>());
+        let with_sidecar = record("with-sidecar.wav", Some(tx));
+        let forwarded = drain.join().unwrap();
+        let without_sidecar = record("without-sidecar.wav", None);
+
+        assert_eq!(forwarded, samples.len(), "the sender saw every sample");
+        assert_eq!(
+            with_sidecar, without_sidecar,
+            "the WAV must not depend on whether a sidecar consumer exists"
+        );
+        let reader = hound::WavReader::new(std::io::Cursor::new(&without_sidecar)).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.duration(), samples.len() as u32);
+    }
+
+    #[test]
     fn wav_creation_preserves_existing_nonempty_recording() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recording.wav");
@@ -3455,6 +3597,64 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(create_wav_writer(&path).is_err());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn wav_creation_reuses_a_private_header_only_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leftover.wav");
+        let writer = create_wav_writer(&path).unwrap();
+        writer.finalize().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), WAV_HEADER_LEN);
+
+        let mut writer = create_wav_writer(&path).unwrap();
+        writer.write_sample(7_i16).unwrap();
+        writer.finalize().unwrap();
+        let mut reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.len(), 1);
+        assert_eq!(reader.samples::<i16>().next().unwrap().unwrap(), 7);
+    }
+
+    #[test]
+    fn wav_creation_still_refuses_a_leftover_with_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recorded.wav");
+        let mut writer = create_wav_writer(&path).unwrap();
+        writer.write_sample(7_i16).unwrap();
+        writer.finalize().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(create_wav_writer(&path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn wav_creation_preserves_a_locked_header_only_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked.wav");
+        create_wav_writer(&path).unwrap().finalize().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        assert!(create_wav_writer(&path).is_err());
+        drop(file);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wav_creation_preserves_a_public_header_only_leftover() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("public-header.wav");
+        create_wav_writer(&path).unwrap().finalize().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(create_wav_writer(&path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[cfg(unix)]
@@ -3562,7 +3762,20 @@ mod tests {
             CaptureWriterPump::start(writer, Arc::clone(&count), Arc::clone(&failed), None);
         let samples = vec![0.25_f32; 32_137];
         pump.queue.push_samples(&samples);
-        pump.finish().unwrap();
+        let finish_started = Instant::now();
+        // Allow slow hosted filesystems to seal the file in this tail-integrity
+        // test; dedicated blocked-writer tests still enforce bounded stop.
+        pump.finish_with_timeout(std::time::Duration::from_secs(15))
+            .unwrap_or_else(|error| {
+            panic!(
+                "capture writer stop failed: {error:?}; elapsed_us={}, accepted={}/{}, queued={}, storage_failed={}",
+                finish_started.elapsed().as_micros(),
+                count.load(Ordering::Relaxed),
+                samples.len(),
+                pump.queue.samples.len(),
+                failed.load(Ordering::Acquire),
+            )
+        });
         assert!(!failed.load(Ordering::Acquire));
         assert_eq!(count.load(Ordering::Relaxed), samples.len() as u64);
         let reader = hound::WavReader::open(path).unwrap();
@@ -4529,6 +4742,29 @@ mod tests {
             guard.check_time_and_disk_at(disk_check_at),
             SafetyAction::Stop(StopReason::DiskSpaceLow, _)
         ));
+    }
+
+    #[test]
+    fn stem_size_guard_warns_once_then_stops_below_the_wav_limit() {
+        let mut guard = StemSizeGuard::new();
+        assert!(matches!(guard.check(1024), SafetyAction::None));
+        let stop_at = WAV_STEM_BYTE_LIMIT - STEM_STOP_HEADROOM_BYTES;
+        assert!(matches!(
+            guard.check(stop_at / 10 * 9),
+            SafetyAction::Warning(_)
+        ));
+        // The warning fires once.
+        assert!(matches!(
+            guard.check(stop_at / 10 * 9 + 1),
+            SafetyAction::None
+        ));
+        assert!(matches!(
+            guard.check(stop_at),
+            SafetyAction::Stop(StopReason::StemSizeLimit, _)
+        ));
+        // Two minutes of 96 kHz mono f32 still fit between the stop point and
+        // the header limit: far more than the 5 s check interval plus stop.
+        assert!(stop_at + 2 * 60 * 96_000 * 4 < WAV_STEM_BYTE_LIMIT);
     }
 
     #[test]

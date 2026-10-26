@@ -12,9 +12,41 @@
 //! isolates only `output_dir` therefore still writes to real user state. Wrap
 //! any such test in [`with_temp_home`].
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// Whether this process is a test binary built by `cargo test`.
+///
+/// `cfg(test)` only reaches this crate's own unit tests. Integration tests in
+/// `tests/` and the test binaries of other crates (the desktop app, the CLI)
+/// link this crate as an ordinary dependency, so they are recognized by where
+/// Cargo puts them instead: `<target>/<profile>/deps/<crate>-<16 hex>`.
+/// Installed binaries, `cargo run` builds (`<target>/<profile>/<name>`) and
+/// the bundled app never match that shape, so runtime behavior is unchanged.
+pub fn running_under_cargo_test() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    static DETECTED: OnceLock<bool> = OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        std::env::current_exe()
+            .map(|exe| is_cargo_test_binary(&exe))
+            .unwrap_or(false)
+    })
+}
+
+fn is_cargo_test_binary(exe: &Path) -> bool {
+    let in_deps = exe.parent().and_then(Path::file_name) == Some(OsStr::new("deps"));
+    let hashed_stem = exe
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .and_then(|stem| stem.rsplit_once('-'))
+        .is_some_and(|(name, hash)| {
+            !name.is_empty() && hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        });
+    in_deps && hashed_stem
+}
 
 /// Serialize tests that mutate the `HOME` environment variable.
 ///
@@ -108,4 +140,43 @@ pub fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
     let temp = tempfile::tempdir().expect("temp home");
     let _home = HomeOverride::set(temp.path());
     f(temp.path())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_test_binaries_are_recognized_by_their_target_layout() {
+        for exe in [
+            "/repo/target/debug/deps/minutes_core-0123456789abcdef",
+            "/repo/target/release/deps/minutes_app-fedcba9876543210",
+            "/repo/target/debug/deps/integration-00000000deadbeef",
+            "C:/repo/target/debug/deps/minutes_app-0123456789abcdef.exe",
+        ] {
+            assert!(is_cargo_test_binary(Path::new(exe)), "{exe}");
+        }
+    }
+
+    #[test]
+    fn shipped_and_cargo_run_binaries_are_not_test_binaries() {
+        for exe in [
+            "/repo/target/debug/minutes",
+            "/repo/target/debug/minutes-app",
+            "/Applications/Minutes.app/Contents/MacOS/minutes-app",
+            "/opt/homebrew/bin/minutes",
+            "/repo/target/debug/deps/minutes",
+            "/repo/target/debug/deps/minutes-app",
+            "/repo/target/debug/deps/minutes-0123456789abcdeg",
+            "/repo/target/debug/deps/-0123456789abcdef",
+            "/home/me/bin/minutes-0123456789abcdef",
+        ] {
+            assert!(!is_cargo_test_binary(Path::new(exe)), "{exe}");
+        }
+    }
+
+    #[test]
+    fn this_crates_unit_tests_count_as_a_test_harness() {
+        assert!(running_under_cargo_test());
+    }
 }

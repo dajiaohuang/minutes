@@ -45,7 +45,8 @@ schema version bump. Additive fields do not.
 | Field | Type | Notes |
 |---|---|---|
 | `source` | string | Provenance tag, e.g. `live-recording`, `voice-memo`, `upload`. |
-| `status` | enum | One of: `complete`, `processing`, `failed`. |
+| `status` | enum | One of: `complete`, `transcript-only`, `degraded`, `no-speech`. See [Processing status](#processing-status). |
+| `processing_warnings` | list&lt;[ProcessingWarning](#processingwarning)&gt; | Per-step degradation details. Omitted when empty. |
 | `tags` | list&lt;string&gt; | Keyword tags. No schema; free-form. |
 | `device` | string | Audio device label at capture time. |
 | `captured_at` | datetime | When capture started, if different from `date`. |
@@ -60,6 +61,22 @@ schema version bump. Additive fields do not.
 | `calendar_event` | string | Calendar event id (Google Calendar, Outlook) when matched. |
 | `recording_health` | object | Optional capture/diarization diagnostics. See [Recording health](#recording-health) below. Omitted when no warnings or capture-health metadata are present. |
 
+### Processing status
+
+`status` describes the saved artifact, not the processing job's lifecycle.
+`processing` and `failed` are not frontmatter status values.
+
+| Value | Meaning |
+|---|---|
+| `complete` | Finished artifact without reported processing degradation. For audio processed with summarization enabled, the engine returned output; individual extraction fields can still be empty. |
+| `transcript-only` | Transcript saved without a summary. Expected with `summarization.engine = "none"`; also used for the initial saved transcript before background refinement. |
+| `degraded` | Transcript saved, but a processing step failed, fell back, or produced incomplete output. See `processing_warnings` for the step and reason. |
+| `no-speech` | Transcription fell below `transcription.min_words`, or the all-noise suppression gate rejected the transcript. This is not a processing job failure. |
+
+`complete` does not guarantee that every optional field is populated or that
+later indexing succeeded. Likewise, `degraded` does not mean the saved
+transcript was lost.
+
 ### Participants
 
 | Field | Type | Notes |
@@ -70,11 +87,20 @@ schema version bump. Additive fields do not.
 | `entities` | object | Structured entity links. See [Entities](#entities) below. |
 | `speaker_map` | list&lt;SpeakerAttribution&gt; | Diarizer speaker label → real person mapping. See [Speaker attribution](#speaker-attribution) below. |
 | `name_corrections` | list&lt;NameCorrection&gt; | Applied post-pass name corrections as `{raw, corrected}` records. Omitted when no corrections were made. |
+| `spelling_corrections` | list&lt;SpellingCorrection&gt; | Vocabulary misspellings rewritten to the canonical spelling right after transcription, as `{raw, corrected, count}` records. Only misspellings you listed on acronym or term entries (`minutes vocabulary add ... --misspelling`), matched as whole words ignoring case. Omitted when nothing was rewritten. |
 
 ### Structured extraction
 
 These fields are the product. They are what agents query when a user asks
 "what did I promise Sarah?" or "what got decided about pricing?".
+
+During audio processing, `action_items`, `decisions`, and `intents` are
+extracted from the configured summarization engine's output. The summary
+itself is written in the Markdown body under `## Summary`, not as a
+frontmatter `summary` field. With `summarization.engine = "none"`, these
+extraction fields and the summary section are absent by design, normally
+with `status: transcript-only` (unless no-speech or degradation applies).
+Empty extraction lists are omitted even on `complete` artifacts.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -85,6 +111,27 @@ These fields are the product. They are what agents query when a user asks
 ---
 
 ## Nested types
+
+### ProcessingWarning
+
+`processing_warnings` explains non-fatal degradation on saved artifacts,
+such as a configured summarizer returning no output:
+
+```yaml
+status: degraded
+processing_warnings:
+  - step: summarize
+    reason: summarize_failed
+    timeout_secs: 300
+    message: Summarization produced no output; see audio.log for the precise reason.
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `step` | string | ✓ | Pipeline step that produced the warning, e.g. `summarize`. |
+| `reason` | string | ✓ | Machine-readable reason, e.g. `summarize_failed`. |
+| `timeout_secs` | integer | | Timeout budget in seconds, when supplied; its presence alone does not prove a timeout. |
+| `message` | string | | Human-readable detail. Do not parse for logic. |
 
 ### ActionItem
 
@@ -190,8 +237,9 @@ Each entry has four fields:
 | `confidence` | enum | ✓ | `high` / `medium` / `low`. |
 | `source` | enum | ✓ | `deterministic` / `llm` / `enrollment` / `manual` / `ml-bleed-degraded` / `stem-recovery`. Tells consumers how the attribution was derived. |
 
-Produced by Minutes' diarization + attribution pipeline. Four confidence
-levels (L0-L3).
+Produced by Minutes' diarization + attribution pipeline, separately from
+summary extraction. `speaker_map` can be present even when summarization is
+disabled and is omitted when empty. Four confidence levels (L0-L3).
 
 **The L-levels below are a conceptual ladder, not the on-disk vocabulary.** The
 only values valid in `source` are the six in the table above. The parenthetical

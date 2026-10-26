@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "task": "full-native-diarization",
+  "provenance": {
+    "selection": "Three distinct AMI development speaker groups, fresh to this Oct18 comparison; earlier contributor benchmark IDs unavailable so no claim of never-before-project scoring or model-training independence. Algorithms/thresholds frozen before predictions.",
+    "independent_blinding": false,
+    "model_training_independence": false,
+    "historical_benchmark_overlap": "PR71 reported numbered AMI/VoxConverse clips without source filenames. Historical overlap cannot be excluded. These are fresh to the current frozen comparison, not a claimed unseen upstream benchmark.",
+    "coverage": "Two scenario meetings and one unstructured meeting, distinct AMI groups; English/Array1-01 only; no general SOTA or default promotion."
+  },
+  "sources": {
+    "baseline": {
+      "repository": "https://github.com/silverstein/minutes",
+      "revision": "cfaccda1f5175bcfb4d78d28a99160e6b336ba1f",
+      "version": "0.30.4",
+      "probe": "crates/core/examples/diarize_file.rs",
+      "model": "community-1"
+    },
+    "candidate": {
+      "repository": "https://github.com/avencera/speakrs",
+      "revision": "af8013f95a53a37a554d8abc6e4ae2ab9a614be6",
+      "source_archive_sha256": "5b4431cdc6b6b709e697c656acdda149d4f5544576bffbebe471d5871131fd5b",
+      "version": "0.7.0",
+      "probe": "examples/diarize_wav.rs, unmodified",
+      "features": "cpu, default features disabled; online disabled",
+      "configuration": "Default CPU pipeline;1-second step, Gaussian PLDA/VBx, no oracle speaker count or threshold tuning."
+    }
+  },
+  "gates": {
+    "minimum_der_improvement": 0.05,
+    "maximum_recording_regression": 0.03,
+    "maximum_speaker_count_error": 1,
+    "maximum_real_time_factor": 0.25,
+    "maximum_peak_rss_bytes": 4294967296
+  },
+  "resource_policy": {
+    "wall_seconds": 900,
+    "audio_seconds": 3600,
+    "file_bytes": 16777216,
+    "rss": "sampled process-group watchdog4GiB, kernel child peak reported separately; no kernel memory reservation",
+    "priority": "nice10",
+    "thread_hints": {
+      "RAYON_NUM_THREADS": 2,
+      "OMP_NUM_THREADS": 2,
+      "OPENBLAS_NUM_THREADS": 2,
+      "VECLIB_MAXIMUM_THREADS": 2
+    },
+    "thread_fairness": "Hints are not a hard thread cap. Minutes ONNX sessions use one intra/inter thread; benchmark records engine configurations, not an equal-work microbenchmark."
+  },
+  "models": {
+    "baseline": {
+      "attribution": "pyannote Community-1, CC-BY-4.0; ONNX conversion by altunenes. See https://huggingface.co/pyannote/speaker-diarization-community-1 and https://huggingface.co/altunenes/speaker-diarization-community-1-onnx",
+      "files": [
+        {
+          "name": "segmentation-community-1.onnx",
+          "url": "https://huggingface.co/altunenes/speaker-diarization-community-1-onnx/resolve/main/segmentation-community-1.onnx",
+          "sha256": "62d59a487d8ba877d0bd1638c53aa06a810bdb104fb776a27ec2204521711006"
+        },
+        {
+          "name": "embedding-community-1.onnx",
+          "url": "https://huggingface.co/altunenes/speaker-diarization-community-1-onnx/resolve/main/embedding_model.onnx",
+          "sha256": "b62448ababb2ee9fc1ce51870553507893ea427fb1fd77e199af425ff1ed0677"
+        }
+      ]
+    },
+    "candidate": {
+      "revision": "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8",
+      "source_pipeline": "af8013f95a53a37a554d8abc6e4ae2ab9a614be6",
+      "files": [
+        {
+          "name": "segmentation-3.0.safetensors",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/segmentation-3.0.safetensors",
+          "sha256": "88e7883cf56f679170e162419efddf970f929915281ebce80e351c42b5a7115d",
+          "bytes": 5897576
+        },
+        {
+          "name": "wespeaker-multimask-tail.safetensors",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/wespeaker-multimask-tail.safetensors",
+          "sha256": "b97b090ceebcf10924732ad4552a2d867d76d38dcc1409a13687a6ba71ff1ef3",
+          "bytes": 26527656
+        },
+        {
+          "name": "plda_lda.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_lda.npy",
+          "sha256": "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
+          "bytes": 131200
+        },
+        {
+          "name": "plda_tr.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_tr.npy",
+          "sha256": "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
+          "bytes": 131200
+        },
+        {
+          "name": "plda_mu.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_mu.npy",
+          "sha256": "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
+          "bytes": 1152
+        },
+        {
+          "name": "plda_psi.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_psi.npy",
+          "sha256": "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
+          "bytes": 1152
+        },
+        {
+          "name": "plda_mean1.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_mean1.npy",
+          "sha256": "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
+          "bytes": 2176
+        },
+        {
+          "name": "plda_mean2.npy",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/plda_mean2.npy",
+          "sha256": "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
+          "bytes": 640
+        },
+        {
+          "name": "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+          "url": "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/wespeaker-voxceleb-resnet34.min_num_samples.txt",
+          "sha256": "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc",
+          "bytes": 4
+        }
+      ],
+      "provenance": "Public converted pyannote Community1 artifacts; upstream model terms/attribution apply. Converter card has no independent license declaration; evaluation only, no Minutes model redistribution or enrollment compatibility claim."
+    }
+  },
+  "recordings": [
+    {
+      "id": "IS1008a",
+      "duration": 943.9573125,
+      "files": [
+        {
+          "name": "IS1008a.Array1-01.wav",
+          "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1008a/audio/IS1008a.Array1-01.wav",
+          "sha256": "a76f820b0af6adb274f94454521cd82d446a69dace3075a7e623c720d3e19c01"
+        },
+        {
+          "name": "IS1008a.rttm",
+          "url": "https://raw.githubusercontent.com/pyannote/AMI-diarization-setup/67c2d539286e89f68952d5dcf83912bd9f01dfae/only_words/rttms/dev/IS1008a.rttm",
+          "sha256": "e709c5fd669e3d0b787780f7e425e2ca4674b509ef53da3622251362b459ebb1"
+        }
+      ],
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Project, Edinburgh AMI Corpus; RTTM pyannote/AMI-diarization-setup67c2d539"
+      }
+    },
+    {
+      "id": "TS3004a",
+      "duration": 1345.322625,
+      "files": [
+        {
+          "name": "TS3004a.Array1-01.wav",
+          "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3004a/audio/TS3004a.Array1-01.wav",
+          "sha256": "dc8157fd7379e1c7b6a9b69fd5fad6a6bebbc359f914e906a82119d0613e2593"
+        },
+        {
+          "name": "TS3004a.rttm",
+          "url": "https://raw.githubusercontent.com/pyannote/AMI-diarization-setup/67c2d539286e89f68952d5dcf83912bd9f01dfae/only_words/rttms/dev/TS3004a.rttm",
+          "sha256": "44fdf4bf57d1168027c31f1e8312e66550e1d789d4c34332dbad372b9852b2af"
+        }
+      ],
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Project, Edinburgh AMI Corpus; RTTM pyannote/AMI-diarization-setup67c2d539"
+      }
+    },
+    {
+      "id": "IB4001",
+      "duration": 1780.821375,
+      "files": [
+        {
+          "name": "IB4001.Array1-01.wav",
+          "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IB4001/audio/IB4001.Array1-01.wav",
+          "sha256": "b826877e3b2bbf8dc172c578017a06e6fbace086834f3ee9dfd73ccf6f212a8e"
+        },
+        {
+          "name": "IB4001.rttm",
+          "url": "https://raw.githubusercontent.com/pyannote/AMI-diarization-setup/67c2d539286e89f68952d5dcf83912bd9f01dfae/only_words/rttms/dev/IB4001.rttm",
+          "sha256": "6bb16b067661c7a6b2c9d7ceb54917a647bccec7b7ef4fb1479e3fd5e49f08bb"
+        }
+      ],
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Project, Edinburgh AMI Corpus; RTTM pyannote/AMI-diarization-setup67c2d539"
+      }
+    }
+  ]
+}

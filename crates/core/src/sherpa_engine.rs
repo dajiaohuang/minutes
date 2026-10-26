@@ -146,7 +146,7 @@ impl SherpaTranscriptionRange {
 }
 
 #[cfg(feature = "engine-sherpa")]
-fn build_recognizer(config: &Config) -> Result<PluginRecognizer, String> {
+pub(crate) fn build_recognizer(config: &Config) -> Result<PluginRecognizer, String> {
     let dir = model_dir(config);
     if !model_files_present(&dir) {
         return Err(format!(
@@ -161,7 +161,14 @@ fn build_recognizer(config: &Config) -> Result<PluginRecognizer, String> {
         model_dir = %dir.display(),
         "loading sherpa-onnx transducer recognizer through the isolated plugin"
     );
-    PluginRecognizer::new(&dir, config)
+    let started = std::time::Instant::now();
+    let result = PluginRecognizer::new(&dir, config);
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        "sherpa recognizer initialization finished"
+    );
+    result
 }
 
 #[cfg(feature = "engine-sherpa")]
@@ -471,8 +478,22 @@ fn transcription_ranges(samples: &[f32], config: &Config) -> Vec<SherpaTranscrip
 #[cfg(feature = "engine-sherpa")]
 pub fn transcribe_segments(samples: &[f32], config: &Config) -> Result<Vec<(u64, String)>, String> {
     let mut recognizer = build_recognizer(config)?;
+    transcribe_segments_with_recognizer(samples, config, &mut recognizer)
+}
+
+/// Reuse model weights across chunks while keeping each decode stream independent.
+#[cfg(feature = "engine-sherpa")]
+pub(crate) fn transcribe_segments_with_recognizer(
+    samples: &[f32],
+    config: &Config,
+    recognizer: &mut PluginRecognizer,
+) -> Result<Vec<(u64, String)>, String> {
+    let started = std::time::Instant::now();
+    let ranges = transcription_ranges(samples, config);
+    let segmentation_ms = started.elapsed().as_millis() as u64;
+    let decode_started = std::time::Instant::now();
     let mut segments = Vec::new();
-    for range in transcription_ranges(samples, config) {
+    for range in ranges {
         let window = &samples[range.decode_start..range.decode_end];
         let start_ms = range.speech_start as u64 * 1000 / SAMPLE_RATE as u64;
         let text = recognizer.transcribe(16_000, window)?.trim().to_string();
@@ -483,6 +504,8 @@ pub fn transcribe_segments(samples: &[f32], config: &Config) -> Result<Vec<(u64,
     tracing::info!(
         samples = samples.len(),
         segments = segments.len(),
+        segmentation_ms,
+        decode_ms = decode_started.elapsed().as_millis() as u64,
         "sherpa-onnx transcription complete"
     );
     Ok(segments)

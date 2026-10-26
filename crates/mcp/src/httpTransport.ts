@@ -71,7 +71,7 @@ export const HEALTH_HTTP_PATH = "/health";
 export const DEFAULT_MAX_SESSIONS = 16;
 
 /** Request bodies are JSON-RPC envelopes, never audio; paths are passed by name. */
-export const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 
 /**
  * How much of an oversized body to read and throw away before giving up on the

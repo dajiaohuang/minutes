@@ -583,6 +583,13 @@ enum Commands {
         action: AppleSpeechAction,
     },
 
+    /// Local semantic search: find meetings by meaning (EmbeddingGemma 2,
+    /// on this Mac). Restricted meetings are never indexed.
+    Semantic {
+        #[command(subcommand)]
+        action: SemanticAction,
+    },
+
     /// Print Minutes CLI capabilities as JSON for MCP feature detection.
     ///
     /// Emits a stable schema describing what this CLI build supports. The
@@ -978,12 +985,17 @@ enum Commands {
         language: Option<String>,
     },
 
-    /// Download whisper model and set up minutes
+    /// Install speech models; --model selects the Whisper model unless --download-only is set
     Setup {
-        /// Whisper model to download (tiny, base, small, medium, large-v3), or with
-        /// --diarization the model set: legacy or community-1. Omit to let setup choose.
+        /// Whisper model to install and select (base, small, medium, large-v3;
+        /// tiny is an explicit low-resource option), or with --diarization:
+        /// legacy or community-1. Omit to keep the configured model.
         #[arg(short, long)]
         model: Option<String>,
+
+        /// Install --model without changing any saved model or engine selection
+        #[arg(long, requires = "model", conflicts_with_all = ["vad", "list", "diarization", "parakeet", "sherpa", "sherpa_model", "demo"])]
+        download_only: bool,
 
         /// Download only the Silero VAD model(s) into the configured model directory; takes precedence over --model
         #[arg(long)]
@@ -1384,6 +1396,29 @@ enum SensitiveAction {
 }
 
 #[derive(Subcommand)]
+enum SemanticAction {
+    /// Download and verify the embedding model (~310 MB, pinned)
+    Setup,
+    /// Embed new or changed meetings and drop deleted or restricted ones
+    Sync,
+    /// Find meetings related to a query by meaning
+    Search {
+        /// What the meeting was about, in your own words
+        query: String,
+        /// Maximum number of results
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+        /// One JSON object per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show whether the model, worker and index are present
+    Status,
+    /// Delete the semantic index
+    Clear,
+}
+
+#[derive(Subcommand)]
 enum PeopleAction {
     /// Confirm a canonical name and its variants for future projections.
     Merge {
@@ -1426,8 +1461,11 @@ enum VocabularyAction {
         aliases: Vec<String>,
 
         /// Known wrong rendering to recognize after the fact (e.g. "patient
-        /// tricity"). Used for search and matching only, never offered to the
-        /// transcriber. Repeat for multiple.
+        /// tricity"). Used for search and matching, never offered to the
+        /// transcriber. On term and acronym entries it is also rewritten to the
+        /// canonical spelling in new transcripts (recorded in the meeting's
+        /// `spelling_corrections`) and in dictation when its vocabulary cleanup
+        /// is on. Repeat for multiple.
         #[arg(long = "misspelling")]
         misspellings: Vec<String>,
 
@@ -2222,6 +2260,7 @@ fn main() -> Result<()> {
                 cmd_apple_speech_benchmark(&corpus, out.as_deref(), json, &config)
             }
         },
+        Commands::Semantic { action } => cmd_semantic(action, &config),
         Commands::Capabilities { json } => cmd_capabilities(json),
         Commands::Search {
             query,
@@ -2467,6 +2506,7 @@ fn main() -> Result<()> {
         Commands::Sources => cmd_sources(),
         Commands::Setup {
             model,
+            download_only,
             vad,
             list,
             diarization,
@@ -2487,13 +2527,44 @@ fn main() -> Result<()> {
             } else if sherpa {
                 cmd_setup_sherpa(&config, true)
             } else if list {
-                cmd_setup("small", true, false)
+                cmd_setup("small", true, false, false)
             } else if diarization {
-                cmd_setup(model.as_deref().unwrap_or("small"), false, true)
+                cmd_setup(model.as_deref().unwrap_or("small"), false, true, false)
             } else {
-                let plan = setup_plan(model.as_deref());
+                let plan = setup_plan(model.as_deref(), &config);
                 eprintln!("Setup selection: {}", plan.reason);
-                cmd_setup(&plan.whisper_model, false, false)?;
+                let select_model = model.is_some() && !download_only;
+                if select_model {
+                    eprintln!(
+                        "This will set transcription.model = \"{}\". Use --download-only to install it without changing your selection.",
+                        plan.whisper_model
+                    );
+                } else {
+                    eprintln!("Saved model and engine selections will be preserved.");
+                }
+                if model.is_none() && !is_downloadable_whisper_model(&plan.whisper_model) {
+                    eprintln!(
+                        "Keeping custom Whisper model {}; manage its file separately.",
+                        plan.whisper_model
+                    );
+                } else {
+                    cmd_setup(&plan.whisper_model, false, false, select_model)?;
+                }
+                if model.is_none() {
+                    // Live and dictation have independent selections. Installing
+                    // their models must never replace the batch model.
+                    let mut installed = vec![plan.whisper_model.as_str()];
+                    for live_model in [&config.dictation.model, &config.live_transcript.model] {
+                        if !live_model.is_empty() && !installed.contains(&live_model.as_str()) {
+                            if is_downloadable_whisper_model(live_model) {
+                                cmd_setup(live_model, false, false, false)?;
+                                installed.push(live_model);
+                            } else {
+                                eprintln!("Keeping custom live/dictation model {live_model}; manage its file separately.");
+                            }
+                        }
+                    }
+                }
                 if plan.install_sherpa {
                     cmd_setup_sherpa(&config, false)?;
                 }
@@ -3481,6 +3552,14 @@ fn cmd_record(
 
     // Record audio from default input device
     let wav_path = minutes_core::pid::current_wav_path();
+    let mut capabilities = vec![
+        "audio.capture".to_string(),
+        format!("mode.{}", capture_mode.noun().replace(' ', "-")),
+        format!("intent.{}", preflight.intent.as_str()),
+    ];
+    if config.live_transcript.recording_sidecar {
+        capabilities.insert(1, "live.utterance.final".to_string());
+    }
     minutes_core::capture::record_to_wav_with_lifecycle(
         &wav_path,
         stop_flag,
@@ -3488,12 +3567,7 @@ fn cmd_record(
         Some(minutes_core::capture::RecordingStartedContext {
             session_id: context_session_id.clone(),
             source: "capture".into(),
-            capabilities: vec![
-                "audio.capture".into(),
-                "live.utterance.final".into(),
-                format!("mode.{}", capture_mode.noun().replace(' ', "-")),
-                format!("intent.{}", preflight.intent.as_str()),
-            ],
+            capabilities,
         }),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -6674,6 +6748,33 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
     Ok(())
 }
 
+/// Attribute an ASR interval only when every intersecting observation agrees.
+fn transcribe_interval_speaker(
+    start: f64,
+    end: f64,
+    segments: &[minutes_core::diarize::SpeakerSegment],
+) -> Option<&str> {
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || start >= end {
+        return None;
+    }
+    let mut speaker = None;
+    for segment in segments.iter().filter(|segment| {
+        segment.start.is_finite()
+            && segment.end.is_finite()
+            && segment.start >= 0.0
+            && segment.start < segment.end
+            && segment.start < end
+            && segment.end > start
+    }) {
+        match speaker {
+            Some(previous) if previous != segment.speaker.as_str() => return Some("UNKNOWN"),
+            None => speaker = Some(segment.speaker.as_str()),
+            _ => {}
+        }
+    }
+    speaker
+}
+
 /// Keep optional diarization on the shared execution path for both renderers.
 /// The injected operation lets regressions prove text mode actually runs it,
 /// without loading a model or requiring an audio device in the CLI test suite.
@@ -6703,13 +6804,11 @@ fn format_transcribe_result(
             .segments
             .iter()
             .map(|seg| {
-                // Preserve JSON's first-overlapping-window attribution in
-                // both formats; no overlap means no speaker label.
-                let speaker = dr
-                    .segments
-                    .iter()
-                    .find(|s| s.start < seg.end && s.end > seg.start)
-                    .map(|s| s.speaker.clone());
+                // An ASR interval can span overlapping voices or several
+                // sequential turns. Its words cannot safely inherit the first
+                // intersecting raw speaker; both renderers must abstain.
+                let speaker = transcribe_interval_speaker(seg.start, seg.end, &dr.segments)
+                    .map(str::to_owned);
                 TranscribeSegmentOutput {
                     start: seg.start,
                     end: seg.end,
@@ -7482,6 +7581,111 @@ fn cmd_capabilities(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn semantic_worker(config: &Config) -> Result<minutes_core::semantic::EmbedWorker> {
+    use minutes_core::semantic;
+    let worker = semantic::worker_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "minutes-embed-worker was not found beside this binary (set MINUTES_EMBED_WORKER)"
+        )
+    })?;
+    let model_root = &config.transcription.model_path;
+    if !semantic::model_installed(model_root) {
+        anyhow::bail!("the semantic search model is not installed; run `minutes semantic setup`");
+    }
+    Ok(semantic::EmbedWorker::spawn(
+        &worker,
+        &semantic::model_path(model_root),
+        semantic::DIMENSIONS,
+    )?)
+}
+
+fn cmd_semantic(action: SemanticAction, config: &Config) -> Result<()> {
+    use minutes_core::{semantic, semantic_index, semantic_search};
+    match action {
+        SemanticAction::Setup => {
+            let path = semantic::install_model(&config.transcription.model_path)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            println!("Semantic search model ready: {}", path.display());
+        }
+        SemanticAction::Sync => {
+            let mut worker = semantic_worker(config)?;
+            let started = std::time::Instant::now();
+            let stats = semantic_search::sync(config, &mut worker, |done, total| {
+                if done % 50 == 0 || done == total {
+                    eprintln!("  {done}/{total} meetings checked");
+                }
+                true
+            })?;
+            println!(
+                "Semantic index: {} meetings, {} embedded ({} chunks), {} unchanged, {} removed in {:.0}s",
+                stats.meetings,
+                stats.embedded,
+                stats.chunks,
+                stats.unchanged,
+                stats.removed,
+                started.elapsed().as_secs_f32()
+            );
+        }
+        SemanticAction::Search { query, limit, json } => {
+            let mut worker = semantic_worker(config)?;
+            let hits = semantic_search::search(
+                config,
+                &mut worker,
+                &query,
+                &minutes_core::search::SearchFilters::default(),
+                limit,
+            )?;
+            for (result, score) in hits {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "score": score,
+                            "title": result.title,
+                            "date": result.date,
+                            "path": result.path,
+                            "snippet": result.snippet,
+                        })
+                    );
+                } else {
+                    println!(
+                        "{score:.3}  {}  ({})",
+                        result.title,
+                        &result.date[..10.min(result.date.len())]
+                    );
+                    println!("       {}", result.snippet);
+                }
+            }
+        }
+        SemanticAction::Status => {
+            let model_root = &config.transcription.model_path;
+            println!("Enabled in config: {}", config.search.semantic);
+            println!(
+                "Model installed:   {}",
+                semantic::model_installed(model_root)
+            );
+            println!(
+                "Worker:            {}",
+                semantic::worker_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "not found".into())
+            );
+            let index = semantic_index::SemanticIndex::open(
+                &Config::minutes_dir(),
+                semantic_search::MODEL_ID,
+                semantic::DIMENSIONS,
+            )?;
+            let (meetings, chunks) = index.counts()?;
+            println!("Index:             {meetings} meetings, {chunks} chunks");
+        }
+        SemanticAction::Clear => {
+            semantic_index::clear(&Config::minutes_dir())?;
+            println!("Semantic index deleted.");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_apple_speech_capabilities(json: bool) -> Result<()> {
     let report = apple_speech::probe_capabilities()?;
 
@@ -7761,7 +7965,7 @@ struct SetupPlan {
     reason: String,
 }
 
-fn setup_plan(explicit_model: Option<&str>) -> SetupPlan {
+fn setup_plan(explicit_model: Option<&str>, config: &Config) -> SetupPlan {
     #[cfg(feature = "engine-sherpa")]
     let plugin_present = minutes_core::sherpa_plugin::plugin_available();
     #[cfg(not(feature = "engine-sherpa"))]
@@ -7769,17 +7973,19 @@ fn setup_plan(explicit_model: Option<&str>) -> SetupPlan {
 
     setup_plan_for(
         explicit_model,
+        &config.transcription.model,
         cfg!(all(
             feature = "engine-sherpa",
             target_os = "macos",
             target_arch = "aarch64"
-        )),
+        )) && config.transcription.engine == "auto",
         plugin_present,
     )
 }
 
 fn setup_plan_for(
     explicit_model: Option<&str>,
+    configured_model: &str,
     sherpa_auto_supported: bool,
     plugin_present: bool,
 ) -> SetupPlan {
@@ -7787,39 +7993,43 @@ fn setup_plan_for(
         return SetupPlan {
             whisper_model: model.to_string(),
             install_sherpa: false,
-            reason: format!("--model selected Whisper {model}."),
+            reason: format!("--model requests installation of Whisper {model}."),
         };
     }
 
     if sherpa_auto_supported && plugin_present {
         SetupPlan {
-            whisper_model: "tiny".into(),
+            whisper_model: configured_model.into(),
             install_sherpa: true,
-            reason: "this Apple Silicon build includes sherpa, so setup will install Parakeet v3 plus Whisper tiny for live and dictation fallback.".into(),
+            reason: format!("this Apple Silicon build includes sherpa, so setup will install Parakeet v3 and keep the configured Whisper {configured_model} model. Live and dictation keep their own selections."),
         }
     } else if sherpa_auto_supported {
         SetupPlan {
-            whisper_model: "small".into(),
+            whisper_model: configured_model.into(),
             install_sherpa: false,
-            reason: "this Apple Silicon build includes sherpa but its plugin is missing, so setup will install Whisper small. Install `minutes-macos-arm64-sherpa.tar.gz` or the signed desktop app to get the plugin and Parakeet v3.".into(),
+            reason: format!("this Apple Silicon build includes sherpa but its plugin is missing, so setup will keep Whisper {configured_model}. Install `minutes-macos-arm64-sherpa.tar.gz` or the signed desktop app to get the plugin and Parakeet v3."),
         }
     } else {
         SetupPlan {
-            whisper_model: "small".into(),
+            whisper_model: configured_model.into(),
             install_sherpa: false,
-            reason: "sherpa auto-selection is unavailable on this build or platform, so setup will install Whisper small.".into(),
+            reason: format!("sherpa auto-selection is unavailable on this build or platform, so setup will keep Whisper {configured_model}."),
         }
     }
 }
 
-fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
+fn is_downloadable_whisper_model(model: &str) -> bool {
+    ["tiny", "base", "small", "medium", "large-v3"].contains(&model)
+}
+
+fn cmd_setup(model: &str, list: bool, diarization: bool, select_model: bool) -> Result<()> {
     if list {
         eprintln!("Available whisper models:");
-        eprintln!("  tiny      75 MB   (fastest, lowest quality)");
         eprintln!("  base     142 MB");
         eprintln!("  small    466 MB   (recommended default)");
         eprintln!("  medium   1.5 GB");
         eprintln!("  large-v3 3.1 GB   (best quality, slower)");
+        eprintln!("  tiny      75 MB   (advanced low-resource choice; lower accuracy)");
         eprintln!();
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
@@ -7856,7 +8066,7 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
     }
 
     let valid_models = ["tiny", "base", "small", "medium", "large-v3"];
-    if !valid_models.contains(&model) {
+    if !is_downloadable_whisper_model(model) {
         anyhow::bail!(
             "unknown model: {}. Available: {}",
             model,
@@ -7943,20 +8153,21 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         }
     }
 
-    let config_path = Config::config_path();
-    Config::upsert_string_setting_at(&config_path, "transcription", "model", model).with_context(
-        || {
-            format!(
-                "failed to save the selected model in {}",
-                config_path.display()
-            )
-        },
-    )?;
-    eprintln!(
-        "Configured transcription.model = \"{}\" in {}",
-        model,
-        config_path.display()
-    );
+    if select_model {
+        let config_path = Config::config_path();
+        Config::upsert_string_setting_at(&config_path, "transcription", "model", model)
+            .with_context(|| {
+                format!(
+                    "failed to save the selected model in {}",
+                    config_path.display()
+                )
+            })?;
+        eprintln!(
+            "Configured transcription.model = \"{}\" in {}",
+            model,
+            config_path.display()
+        );
+    }
 
     download_vad_models(model_dir)?;
 
@@ -9027,7 +9238,7 @@ fn cmd_qmd(action: &str, collection: &str) -> Result<()> {
 fn cmd_service(action: &str) -> Result<()> {
     let minutes_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("minutes"));
     let home = dirs::home_dir().unwrap_or_default();
-    let log_dir = Config::minutes_dir().join("logs");
+    let log_dir = minutes_core::logging::log_dir();
     let agents_dir = home.join("Library/LaunchAgents");
     let bin_str = minutes_bin.display().to_string();
     let home_str = home.display().to_string();
@@ -9455,7 +9666,7 @@ fn cmd_logs(errors: bool, lines: usize) -> Result<()> {
     if !assistant_policy_allows_restricted_content() {
         anyhow::bail!("local logs are unavailable under the active assistant policy");
     }
-    let log_path = Config::minutes_dir().join("logs").join("minutes.log");
+    let log_path = minutes_core::logging::log_path();
     if !log_path.exists() {
         eprintln!("No log file found at {}", log_path.display());
         return Ok(());
@@ -9612,7 +9823,7 @@ mod tests {
     /// (`STATUS_STACK_OVERFLOW` in `copilot_start_parses_goal_and_surface`
     /// on #883). Production parsing runs once on the main thread and is
     /// unaffected; this keeps the tests honest without shrinking coverage.
-    fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+    pub(super) fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
@@ -10471,26 +10682,63 @@ life (qmd://life/)
 
     #[test]
     fn setup_plan_keeps_explicit_model_and_platform_defaults() {
-        let explicit = setup_plan_for(Some("medium"), true, false);
+        let explicit = setup_plan_for(Some("medium"), "small", true, false);
         assert_eq!(explicit.whisper_model, "medium");
         assert!(!explicit.install_sherpa);
 
-        let apple_silicon = setup_plan_for(None, true, true);
-        assert_eq!(apple_silicon.whisper_model, "tiny");
+        let apple_silicon = setup_plan_for(None, "small", true, true);
+        assert_eq!(apple_silicon.whisper_model, "small");
         assert!(apple_silicon.install_sherpa);
         assert!(apple_silicon.reason.contains("Apple Silicon"));
 
-        let plugin_missing = setup_plan_for(None, true, false);
-        assert_eq!(plugin_missing.whisper_model, "small");
+        let plugin_missing = setup_plan_for(None, "medium", true, false);
+        assert_eq!(plugin_missing.whisper_model, "medium");
         assert!(!plugin_missing.install_sherpa);
         assert!(plugin_missing
             .reason
             .contains("minutes-macos-arm64-sherpa.tar.gz"));
         assert!(plugin_missing.reason.contains("desktop app"));
 
-        let fallback = setup_plan_for(None, false, false);
-        assert_eq!(fallback.whisper_model, "small");
+        let fallback = setup_plan_for(None, "large-v3", false, false);
+        assert_eq!(fallback.whisper_model, "large-v3");
         assert!(!fallback.install_sherpa);
+
+        // Tiny remains valid when a user deliberately selected it. Setup must
+        // not silently upgrade that choice either.
+        let retained = setup_plan_for(None, "tiny", true, true);
+        assert_eq!(retained.whisper_model, "tiny");
+    }
+
+    #[test]
+    fn download_only_requires_one_whisper_model_and_rejects_other_setup_modes() {
+        let parsed = parse_cli(["minutes", "setup", "--model", "base", "--download-only"])
+            .expect("install-only Whisper setup must parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::Setup {
+                download_only: true,
+                ..
+            }
+        ));
+        assert!(parse_cli(["minutes", "setup", "--download-only"]).is_err());
+        for mode in [
+            "--vad",
+            "--list",
+            "--diarization",
+            "--parakeet",
+            "--sherpa",
+            "--demo",
+        ] {
+            assert!(parse_cli([
+                "minutes",
+                "setup",
+                "--model",
+                "base",
+                "--download-only",
+                mode
+            ])
+            .is_err());
+        }
     }
 
     #[test]
@@ -11858,7 +12106,15 @@ life (qmd://life/)
             .to_string();
         assert!(!help.contains("authorized-input"));
 
-        let command = Cli::command();
+        // CommandFactory builds the same large debug parser as parse_cli.
+        // Keep this inspection on the established #884 test stack as well.
+        let command = std::thread::Builder::new()
+            .name("cli-command-test".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(Cli::command)
+            .expect("spawn cli command thread")
+            .join()
+            .expect("cli command thread panicked");
         let process = command
             .find_subcommand("process")
             .expect("process subcommand exists");
@@ -12102,6 +12358,37 @@ life (qmd://life/)
             Some("pricing-owner")
         );
         assert_eq!(match_model_eval_opportunity(&labels, 2_500, &draft), None);
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn transcript_text_output_names_the_disabled_sidecar_instead_of_waiting() {
+        use minutes_core::copilot::RelayDraftState;
+        use minutes_core::live_transcript::LiveTranscriptDisabled;
+
+        // Sidecar off: the relay still runs final-only, so `active` is true.
+        let line = current_speech_summary_line(
+            true,
+            RelayDraftState::Unsupported,
+            Some(LiveTranscriptDisabled::RecordingSidecarConfig),
+        )
+        .unwrap();
+        assert!(line.contains("live transcript off for this recording"));
+        assert!(line.contains("live_transcript.recording_sidecar = false"));
+        assert!(!line.contains("finalized transcript only"));
+
+        assert_eq!(
+            current_speech_summary_line(true, RelayDraftState::Unsupported, None).as_deref(),
+            Some("[current speech: finalized transcript only]")
+        );
+        assert_eq!(
+            current_speech_summary_line(true, RelayDraftState::None, None),
+            None
+        );
+        assert_eq!(
+            current_speech_summary_line(false, RelayDraftState::Unavailable, None),
+            None
+        );
     }
 
     #[cfg(feature = "whisper")]
@@ -13561,6 +13848,134 @@ life (qmd://life/)
     }
 
     #[test]
+    fn transcribe_diarization_abstains_for_overlap_and_cross_speaker_intervals() {
+        use minutes_core::diarize::{DiarizationResult, SpeakerSegment};
+        let result = transcribe_render_fixture();
+        for (second_start, first_end) in [(2.0, 3.0), (2.0, 2.0)] {
+            for reverse in [false, true] {
+                let mut segments = vec![
+                    SpeakerSegment {
+                        start: 0.0,
+                        end: first_end,
+                        speaker: "SPEAKER_1".into(),
+                    },
+                    SpeakerSegment {
+                        start: second_start,
+                        end: 4.0,
+                        speaker: "SPEAKER_2".into(),
+                    },
+                ];
+                if reverse {
+                    segments.reverse();
+                }
+                for output_json in [false, true] {
+                    let output = format_transcribe_result(
+                        &result,
+                        output_json,
+                        true,
+                        &Config::default(),
+                        || {
+                            Some(DiarizationResult {
+                                segments: segments.clone(),
+                                num_speakers: 2,
+                                ..Default::default()
+                            })
+                        },
+                    )
+                    .unwrap();
+                    if output_json {
+                        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+                        assert_eq!(json["data"]["segments"][0]["speaker"], "UNKNOWN");
+                        assert_eq!(json["data"]["segments"][0]["text"], "First turn.");
+                        assert!(json["data"]["segments"][2].get("speaker").is_none());
+                    } else {
+                        assert_eq!(
+                            output,
+                            "[0:00] UNKNOWN: First turn.\n[0:12] Second turn.\n[0:15] Unmatched."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transcribe_interval_speaker_preserves_unique_support_and_abstention() {
+        use minutes_core::diarize::SpeakerSegment;
+        let segments = [
+            SpeakerSegment {
+                start: 2.0,
+                end: 4.0,
+                speaker: "A".into(),
+            },
+            SpeakerSegment {
+                start: 0.0,
+                end: 2.0,
+                speaker: "A".into(),
+            },
+            SpeakerSegment {
+                start: 4.0,
+                end: 5.0,
+                speaker: "B".into(),
+            },
+            SpeakerSegment {
+                start: 6.0,
+                end: 7.0,
+                speaker: "UNKNOWN".into(),
+            },
+            SpeakerSegment {
+                start: f64::NAN,
+                end: 4.0,
+                speaker: "invalid".into(),
+            },
+            SpeakerSegment {
+                start: 1.0,
+                end: 0.0,
+                speaker: "invalid".into(),
+            },
+        ];
+        assert_eq!(transcribe_interval_speaker(0.0, 4.0, &segments), Some("A"));
+        assert_eq!(transcribe_interval_speaker(4.0, 5.0, &segments), Some("B"));
+        assert_eq!(
+            transcribe_interval_speaker(3.0, 5.0, &segments),
+            Some("UNKNOWN")
+        );
+        assert_eq!(
+            transcribe_interval_speaker(6.0, 7.0, &segments),
+            Some("UNKNOWN")
+        );
+        assert_eq!(transcribe_interval_speaker(5.0, 6.0, &segments), None);
+        for (start, end) in [
+            (f64::NAN, 4.0),
+            (0.0, f64::INFINITY),
+            (2.0, 2.0),
+            (-1.0, 2.0),
+        ] {
+            assert_eq!(transcribe_interval_speaker(start, end, &segments), None);
+        }
+    }
+
+    #[test]
+    fn enrollment_embedding_requires_one_consistent_speaker() {
+        use minutes_core::diarize::DiarizationResult;
+        let mut result = DiarizationResult {
+            num_speakers: 1,
+            ..Default::default()
+        };
+        result.speaker_embeddings.insert("A".into(), vec![1.0; 256]);
+        assert_eq!(enrollment_embedding(&result).unwrap(), &[1.0; 256]);
+        result.num_speakers = 2;
+        assert!(enrollment_embedding(&result).is_err());
+        result.num_speakers = 1;
+        result.speaker_embeddings.insert("B".into(), vec![1.0; 256]);
+        assert!(enrollment_embedding(&result).is_err());
+        result.speaker_embeddings.clear();
+        assert!(enrollment_embedding(&result).is_err());
+        result.num_speakers = 0;
+        assert!(enrollment_embedding(&result).is_err());
+    }
+
+    #[test]
     fn transcribe_without_diarization_preserves_text_and_skips_the_engine() {
         let result = transcribe_render_fixture();
         let output = format_transcribe_result(&result, false, false, &Config::default(), || {
@@ -14236,6 +14651,18 @@ impl Drop for LiveCaptureGuard {
     }
 }
 
+#[cfg(feature = "whisper")]
+fn recording_has_live_text_disabled() -> bool {
+    minutes_core::live_transcript::session_status()
+        .disabled
+        .is_some()
+}
+
+#[cfg(not(feature = "whisper"))]
+fn recording_has_live_text_disabled() -> bool {
+    false
+}
+
 fn cmd_copilot_start(
     goal: &str,
     surface: Option<&str>,
@@ -14351,6 +14778,11 @@ fn cmd_copilot_start(
     } else {
         None
     };
+    // A recording with the sidecar off publishes nothing; refuse rather than
+    // listen to silence until it stops.
+    if relay_client.is_some() && recording_has_live_text_disabled() {
+        anyhow::bail!("{}", minutes_core::copilot::RECORDING_WITHOUT_LIVE_TEXT);
+    }
     let evidence_mode = relay_client
         .as_ref()
         .map(|client| client.discovery().evidence_mode)
@@ -18296,6 +18728,21 @@ fn persist_identity_name(name: &str, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn enrollment_embedding(result: &minutes_core::diarize::DiarizationResult) -> Result<&[f32]> {
+    match (
+        result.num_speakers,
+        result.speaker_embeddings.len(),
+        result.speaker_embeddings.values().next(),
+    ) {
+        (1, 1, Some(embedding)) => Ok(embedding.as_slice()),
+        _ => anyhow::bail!(
+            "Could not isolate one consistent speaker for enrollment. No profile was changed. \
+             Record a clear sample with only you speaking, then try again. \
+             For help: https://github.com/silverstein/minutes/discussions"
+        ),
+    }
+}
+
 fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
     use minutes_core::voice;
 
@@ -18439,29 +18886,11 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         ));
     }
 
-    if result.num_speakers > 1 {
-        tracing::warn!(
-            speakers = result.num_speakers,
-            "multiple speakers detected during enrollment — picking an arbitrary one"
-        );
-        eprintln!(
-            "  ⚠ Detected {} voices — the enrolled profile may not be yours.",
-            result.num_speakers
-        );
-        eprintln!("  For best results, re-run in a quiet room with just you speaking.");
-    }
-
     eprintln!("  \x1b[2mComputing voice profile...\x1b[0m");
 
-    // Enrollment expects a single speaker, so just grab the first available
-    // embedding. When multiple speakers are detected the choice is arbitrary
-    // (HashMap order), but the user is warned above to re-record solo.
-    let (_, embedding) = result
-        .speaker_embeddings
-        .iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Diarization produced no speaker embeddings."))?;
-    let embedding = embedding.clone();
+    // Refuse ambiguity before opening the profile database. A warning cannot
+    // make an arbitrary HashMap entry a safe identity for the user's voice.
+    let embedding = enrollment_embedding(&result)?.to_vec();
 
     // Step 5: Save
     let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -18830,6 +19259,9 @@ struct LiveEvidenceSnapshotV1 {
     current_draft: Option<minutes_core::copilot::RelayCurrentDraft>,
     draft_state: minutes_core::copilot::RelayDraftState,
     capture_relay: Option<TranscriptCaptureRelayProjection>,
+    transcript_status: minutes_core::live_transcript::SessionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_relay_error: Option<String>,
     gap: bool,
 }
 
@@ -18845,6 +19277,24 @@ fn relay_draft_state_label(state: minutes_core::copilot::RelayDraftState) -> &'s
         RelayDraftState::Unavailable => "unavailable",
         RelayDraftState::Unsupported => "finalized transcript only",
     }
+}
+
+/// The bracketed line printed after the finals when there is no provisional
+/// draft. `None` means nothing worth printing.
+#[cfg(feature = "whisper")]
+fn current_speech_summary_line(
+    active: bool,
+    draft_state: minutes_core::copilot::RelayDraftState,
+    disabled: Option<minutes_core::live_transcript::LiveTranscriptDisabled>,
+) -> Option<String> {
+    if disabled.is_some() {
+        return Some(
+            "[live transcript off for this recording: live_transcript.recording_sidecar = false; the transcript is written after stop]"
+                .to_string(),
+        );
+    }
+    (active && draft_state != minutes_core::copilot::RelayDraftState::None)
+        .then(|| format!("[current speech: {}]", relay_draft_state_label(draft_state)))
 }
 
 #[cfg(feature = "whisper")]
@@ -18913,12 +19363,15 @@ fn cmd_transcript(
                     source_label,
                     s.pid.unwrap_or(0)
                 );
+            } else if s.disabled.is_some() {
+                eprintln!("Live transcript: off for this recording (live_transcript.recording_sidecar = false)");
+                eprintln!("  The transcript is written after the recording stops.");
             } else {
                 eprintln!("Live transcript: inactive");
             }
             eprintln!("  Lines: {}", s.line_count);
             eprintln!("  Duration: {:.0}s", s.duration_secs);
-            if let Some(ref diagnostic) = s.diagnostic {
+            if let (Some(diagnostic), None) = (s.diagnostic.as_ref(), s.disabled) {
                 eprintln!("  Diagnostic: {}", diagnostic);
             }
             if let Some(ref p) = s.jsonl_path {
@@ -18964,8 +19417,8 @@ fn cmd_transcript(
 
     if include_current {
         let session = minutes_core::live_transcript::session_status();
-        let (capture_relay, draft) = match read_current_speech_replay() {
-            Ok((relay, draft)) => (Some(relay), draft),
+        let (capture_relay, draft, capture_relay_error) = match read_current_speech_replay() {
+            Ok((relay, draft)) => (Some(relay), draft, None),
             Err(minutes_core::copilot::CaptureRelayError::NotFound) if !session.active => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
@@ -18973,14 +19426,16 @@ fn cmd_transcript(
                     draft_state: minutes_core::copilot::RelayDraftState::None,
                     gap: false,
                 },
+                None,
             ),
-            Err(_) => (
+            Err(error) => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
                     current_draft: None,
                     draft_state: minutes_core::copilot::RelayDraftState::Unavailable,
                     gap: false,
                 },
+                Some(error.to_string()),
             ),
         };
         let active = session.active || capture_relay.is_some();
@@ -18991,6 +19446,8 @@ fn cmd_transcript(
             current_draft: draft.current_draft,
             draft_state: draft.draft_state,
             capture_relay,
+            transcript_status: session,
+            capture_relay_error,
             gap: draft.gap,
         };
         if format == "json" {
@@ -19003,13 +19460,12 @@ fn cmd_transcript(
             }
             if let Some(draft) = &snapshot.current_draft {
                 println!("[current speech, provisional] {}", draft.text);
-            } else if snapshot.active
-                && snapshot.draft_state != minutes_core::copilot::RelayDraftState::None
-            {
-                println!(
-                    "[current speech: {}]",
-                    relay_draft_state_label(snapshot.draft_state)
-                );
+            } else if let Some(line) = current_speech_summary_line(
+                snapshot.active,
+                snapshot.draft_state,
+                snapshot.transcript_status.disabled,
+            ) {
+                println!("{line}");
             }
         }
     } else if format == "json" {

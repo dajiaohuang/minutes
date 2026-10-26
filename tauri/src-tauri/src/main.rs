@@ -20,6 +20,8 @@ static PARAKEET_FEATURE_SENTINEL: &[u8] = b"transcribe_parakeet parakeet_helper\
 mod call_capture;
 mod call_detect;
 #[cfg(target_os = "macos")]
+mod capture_recovery_qa;
+#[cfg(target_os = "macos")]
 mod cli_setup;
 mod commands;
 mod context;
@@ -27,7 +29,9 @@ mod dictation_experience;
 mod dictation_field;
 mod palette_dispatch;
 mod pty;
+mod recording_audio;
 mod secret_store;
+mod semantic_commands;
 mod shortcut_manager;
 mod text_insertion;
 
@@ -140,6 +144,39 @@ fn exit_process_without_destructors(code: i32) -> ! {
     {
         std::process::exit(code);
     }
+}
+
+/// Relaunch the app without running C++ static destructors.
+/// `AppHandle::restart` ends in `std::process::exit`, which aborts via
+/// `__cxa_finalize_ranges` on macOS and shows a crash dialog after every update.
+pub(crate) fn restart_without_destructors(app: &tauri::AppHandle) -> ! {
+    #[cfg(not(target_os = "macos"))]
+    app.restart();
+
+    #[cfg(target_os = "macos")]
+    restart_macos_without_destructors(app)
+}
+
+#[cfg(target_os = "macos")]
+fn restart_macos_without_destructors(app: &tauri::AppHandle) -> ! {
+    // Resolve Tauri state before its cleanup: no Tauri APIs may be used after
+    // cleanup_before_exit clears tray, window and webview resources.
+    let env = app.env();
+    let binary = tauri::process::current_binary(&env);
+    cleanup_before_process_exit(app);
+    app.cleanup_before_exit();
+    match binary {
+        Ok(path) => {
+            if let Err(error) = std::process::Command::new(path)
+                .args(env.args_os.iter().skip(1))
+                .spawn()
+            {
+                eprintln!("[restart] failed to relaunch app: {error}");
+            }
+        }
+        Err(error) => eprintln!("[restart] could not resolve current binary: {error}"),
+    }
+    exit_process_without_destructors(0);
 }
 
 fn finish_clean_exit(app: tauri::AppHandle, code: i32) -> ! {
@@ -400,7 +437,8 @@ fn cmd_show_main_window(app: tauri::AppHandle) {
 fn cmd_apply_recall_window_layout(
     app: tauri::AppHandle,
     width: f64,
-    height: f64,
+    // None keeps the window's current height: Recall only ever needs width.
+    height: Option<f64>,
     avoid_right_edge: bool,
 ) -> Result<(), String> {
     const MIN_WIDTH: f64 = 460.0;
@@ -409,7 +447,7 @@ fn cmd_apply_recall_window_layout(
     const MAX_HEIGHT: f64 = 1000.0;
     const FRAME_EPSILON: f64 = 1.0;
 
-    if !width.is_finite() || !height.is_finite() {
+    if !width.is_finite() || height.is_some_and(|height| !height.is_finite()) {
         return Err("invalid recall window layout size".into());
     }
 
@@ -424,9 +462,13 @@ fn cmd_apply_recall_window_layout(
     }
 
     let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
-    let height = height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     let monitor = win.current_monitor().ok().flatten();
     let scale = monitor.as_ref().map(|monitor| monitor.scale_factor());
+    let height = match (height, win.inner_size(), scale) {
+        (Some(height), _, _) => height.clamp(MIN_HEIGHT, MAX_HEIGHT),
+        (None, Ok(size), Some(scale)) => size.height as f64 / scale,
+        (None, _, _) => return Err("could not read the window height".into()),
+    };
 
     if avoid_right_edge {
         if let (Some(monitor), Some(scale)) = (monitor.as_ref(), scale) {
@@ -448,7 +490,7 @@ fn cmd_apply_recall_window_layout(
         }
     }
 
-    let size_needs_update = match (win.outer_size(), scale) {
+    let size_needs_update = match (win.inner_size(), scale) {
         (Ok(size), Some(scale)) => {
             let logical_width = size.width as f64 / scale;
             let logical_height = size.height as f64 / scale;
@@ -1186,13 +1228,8 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
 
     let file_menu = {
-        let open_item = MenuItem::with_id(
-            app,
-            "app-open-main",
-            tr("Open Minutes"),
-            true,
-            Some("Cmd+O"),
-        )?;
+        let open_item =
+            MenuItem::with_id(app, "app-open-main", tr("Open Minutes"), true, None::<&str>)?;
         let note_item = MenuItem::with_id(
             app,
             "app-add-note",
@@ -1691,6 +1728,16 @@ fn main() {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    let app_context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().any(|arg| arg == "--capture-recovery-test-root") {
+        // LaunchServices can supply arguments, but not a per-launch environment.
+        // Install the isolated Dev acceptance environment before starting threads.
+        if let Err(error) = capture_recovery_qa::configure(&app_context.config().identifier) {
+            eprintln!("Capture recovery acceptance setup refused: {error}");
+            std::process::exit(64);
+        }
+    }
     #[cfg(target_os = "macos")]
     if let Some(sidecar) = std::env::current_exe()
         .ok()
@@ -1885,11 +1932,9 @@ fn main() {
                 let _ = app.emit("minutes://show-whats-new", ());
             }
             "calendar-access-warning" => {
-                let _ = std::process::Command::new("open")
-                    .arg(
-                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
-                    )
-                    .spawn();
+                let _ = minutes_core::spawn_reaped(std::process::Command::new("open").arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+                ));
             }
             "app-open-settings" => {
                 show_main_window(app);
@@ -3073,6 +3118,47 @@ fn main() {
                     api.prevent_close();
                     window.hide().ok();
                 }
+                // Native file drops never reach the DOM: Tauri's drag handler
+                // takes them first. Relay them to the page on the app-wide
+                // event channel (the one every other main-window event uses)
+                // so the Recall terminal can type a dropped file's path, and
+                // log the edges so a drop that goes nowhere is diagnosable.
+                tauri::WindowEvent::DragDrop(drag) if window.label() == "main" => {
+                    let (kind, paths, position) = match drag {
+                        tauri::DragDropEvent::Enter { paths, position } => {
+                            ("enter", Some(paths), Some(position))
+                        }
+                        tauri::DragDropEvent::Over { position } => ("over", None, Some(position)),
+                        tauri::DragDropEvent::Drop { paths, position } => {
+                            ("drop", Some(paths), Some(position))
+                        }
+                        tauri::DragDropEvent::Leave => ("leave", None, None),
+                        _ => return,
+                    };
+                    if kind != "over" {
+                        let _ = minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "desktop_file_drag",
+                            "file": "",
+                            "extra": {
+                                "event": kind,
+                                "paths": paths.map(|p| p.len()),
+                                "x": position.map(|p| p.x),
+                                "y": position.map(|p| p.y),
+                            },
+                        }));
+                    }
+                    let _ = window.emit(
+                        "recall:file-drag",
+                        serde_json::json!({
+                            "type": kind,
+                            "paths": paths,
+                            "x": position.map(|p| p.x),
+                            "y": position.map(|p| p.y),
+                        }),
+                    );
+                }
                 tauri::WindowEvent::Focused(false) if window.label() == "palette" => {
                     let app_handle = window.app_handle().clone();
                     let state = app_handle.state::<commands::AppState>();
@@ -3114,6 +3200,7 @@ fn main() {
             commands::cmd_list_meetings,
             commands::cmd_search,
             commands::cmd_add_note,
+            commands::cmd_note_target,
             commands::cmd_sensitive_start,
             commands::cmd_sensitive_stop,
             commands::cmd_run_meeting_debrief,
@@ -3158,6 +3245,14 @@ fn main() {
             commands::cmd_list_devices,
             commands::cmd_remember_dictation_hud_position,
             commands::cmd_delete_meeting,
+            commands::cmd_archive_meeting,
+            semantic_commands::cmd_semantic_status,
+            semantic_commands::cmd_semantic_set_enabled,
+            semantic_commands::cmd_semantic_search,
+            commands::cmd_set_action_item_status,
+            commands::cmd_restore_archived_meeting,
+            commands::cmd_reveal_path,
+            commands::cmd_copy_path,
             commands::cmd_get_meeting_detail,
             commands::cmd_resummarize_meeting,
             commands::cmd_resummarize_status,
@@ -3284,7 +3379,7 @@ fn main() {
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context)
         .expect("error while building minutes app")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {

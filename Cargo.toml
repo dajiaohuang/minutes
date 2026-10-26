@@ -15,11 +15,11 @@ members = [
 # Deliberately not a member: building it downloads the whole sherpa-onnx
 # bundle, which would land on every `cargo clippy --all`, and it ships
 # separately from the binaries by design (issue #685).
-exclude = ["crates/sherpa-plugin"]
+exclude = ["crates/sherpa-plugin", "crates/embed-worker"]
 resolver = "2"
 
 [workspace.package]
-version = "0.30.0"
+version = "0.30.10"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]

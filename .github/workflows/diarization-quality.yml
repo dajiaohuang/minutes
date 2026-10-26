@@ -1,0 +1,111 @@
+name: Diarization quality
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/core/src/diarize*'
+      - 'crates/core/examples/diarize_file.rs'
+      - 'tests/eval/diarization/**'
+      - 'tests/eval/v02/metrics.py'
+      - '.github/workflows/diarization-quality.yml'
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Immutable clock-fixed baseline commit
+        required: true
+        default: '0917898c9391617312ae8cc55a81f5d5c8facf8e'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diarization-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paired-models:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # Keep the clock-fixed admission comparator immutable after the new
+      # pipeline lands. Comparing its next fix with main would measure zero
+      # gain and fail the original gate despite unchanged model predictions.
+      BASELINE_REF: ${{ inputs.baseline_ref || '0917898c9391617312ae8cc55a81f5d5c8facf8e' }}
+      CANDIDATE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CANDIDATE_REF }}
+          persist-credentials: false
+          path: candidate
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.BASELINE_REF }}
+          persist-credentials: false
+          path: baseline
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install Linux audio build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libpulse-dev libclang-dev cmake pkg-config
+      - name: Select the required Speech SDK on Intel macOS
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
+      - name: Scope compiled artifacts to the runner image
+        id: build-scope
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            baseline -> target
+            candidate -> target
+          key: diarization-quality-${{ runner.arch }}-${{ steps.build-scope.outputs.scope }}
+      - uses: actions/cache@v6
+        with:
+          path: fixtures
+          key: diarization-public-fixtures-${{ hashFiles('candidate/tests/eval/diarization/*json') }}
+      - name: Download and verify only pinned public fixtures and models
+        run: python candidate/tests/eval/diarization/fetch.py --directory fixtures
+      - name: Build source-bound baseline with the identical probe harness
+        run: |
+          cp -f candidate/crates/core/examples/diarize_file.rs baseline/crates/core/examples/diarize_file.rs
+          cd baseline
+          cargo build -p minutes-core --no-default-features --features diarize --example diarize_file
+      - name: Build candidate
+        run: |
+          cd candidate
+          cargo build -p minutes-core --no-default-features --features diarize --example diarize_file
+      - name: Score regression controls
+        run: python -m unittest discover -s candidate/tests/eval/diarization -p 'test_*.py'
+      - name: Evaluate complete meetings with global speaker mapping
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          python candidate/tests/eval/diarization/run.py \
+            --manifest candidate/tests/eval/diarization/ami-holdout.json \
+            --audio-directory fixtures/audio --models fixtures/models \
+            --baseline "baseline/target/debug/examples/diarize_file${suffix}" \
+            --candidate "candidate/target/debug/examples/diarize_file${suffix}" \
+            --baseline-revision "$BASELINE_REF" --candidate-revision "$CANDIDATE_REF" \
+            --output results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: diarization-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            results/*.json
+            fixtures/ATTRIBUTION.txt
+          if-no-files-found: warn

@@ -1,0 +1,12 @@
+{
+  "exit": -9,
+  "reason": "cancelled",
+  "processing_seconds": 1.279545667,
+  "sampled_group_peak_rss_bytes": 310558720,
+  "kernel_child_peak_rss_bytes": 310738944,
+  "rss_enforcement": "sampled watchdog; not a kernel memory limit",
+  "input_sha256_before": "b826877e3b2bbf8dc172c578017a06e6fbace086834f3ee9dfd73ccf6f212a8e",
+  "input_sha256_after": "b826877e3b2bbf8dc172c578017a06e6fbace086834f3ee9dfd73ccf6f212a8e",
+  "input_preserved": true,
+  "qualification": "Actual native CPU worker cancellation; internal inference phase not instrumented; no live capture used."
+}

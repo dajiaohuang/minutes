@@ -2257,6 +2257,37 @@ mod tests {
     }
 
     #[test]
+    fn call_detect_events_from_tests_stay_out_of_the_real_log() {
+        // This binary is not minutes-core's own unit-test build, so cfg(test)
+        // in core does not apply here. The log must still be redirected.
+        let _lock = minutes_core::test_support::home_env_lock();
+        let temp_root = std::env::temp_dir();
+        let runtime_dir = minutes_core::Config::minutes_dir().join("logs");
+        let marker = format!("call-detect-isolation-{}", std::process::id());
+
+        log_call_detect_event("info", &marker, None, None, serde_json::json!({}));
+
+        let log_path = minutes_core::logging::log_path();
+        assert!(
+            log_path.starts_with(&temp_root),
+            "test log {} must live under {}",
+            log_path.display(),
+            temp_root.display()
+        );
+        let written = std::fs::read_to_string(&log_path).unwrap();
+        assert!(written.contains(&marker));
+        if !runtime_dir.starts_with(&temp_root) {
+            let real_log =
+                std::fs::read_to_string(runtime_dir.join("minutes.log")).unwrap_or_default();
+            assert!(
+                !real_log.contains(&marker),
+                "a test entry reached the real log at {}",
+                runtime_dir.display()
+            );
+        }
+    }
+
+    #[test]
     fn browser_probe_backoff_resets_after_expiry() {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
 

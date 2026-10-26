@@ -25,6 +25,11 @@ use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct Summary {
+    /// Meeting title written in the same model call as the summary. `None`
+    /// when the model omitted it or when the parsed text held more than one
+    /// title (concatenated chunk outputs), so the pipeline falls back to a
+    /// separate title call.
+    pub title: Option<String>,
     pub text: String,
     pub decisions: Vec<String>,
     pub action_items: Vec<String>,
@@ -164,6 +169,10 @@ pub fn summarize_with_template_report(
     template: Option<&Template>,
     log_file: Option<&str>,
 ) -> SummaryReport {
+    // Resolve once for the full meeting, then pass the same language to every
+    // chunk, synthesis pass and provider. Notes are not language evidence.
+    let resolved_config = resolve_meeting_summary_config(transcript, config, template);
+    let config = &resolved_config;
     let mut coverage = None;
     let engine = &config.summarization.engine;
     let model = summarization_model_hint(config, !screen_files.is_empty());
@@ -572,9 +581,29 @@ pub fn get_effective_summary_language(config: &Config) -> &str {
     }
 }
 
+fn resolve_meeting_summary_config(
+    transcript: &str,
+    config: &Config,
+    template: Option<&Template>,
+) -> Config {
+    let mut resolved = config.clone();
+    if let Some(language) = template
+        .and_then(|template| template.frontmatter.language.as_deref())
+        .filter(|language| !language.eq_ignore_ascii_case("auto"))
+    {
+        resolved.summarization.language = language.to_string();
+    } else if get_effective_summary_language(config) == "auto" {
+        if let Some(language) = crate::summary_semantics::meeting_language(transcript) {
+            resolved.summarization.language = language;
+        }
+    }
+    resolved
+}
+
 fn build_system_prompt(language: &str, template: Option<&Template>) -> String {
     let effective_language = template
         .and_then(|t| t.frontmatter.language.as_deref())
+        .filter(|language| !language.eq_ignore_ascii_case("auto"))
         .unwrap_or(language);
     let base = build_base_system_prompt(effective_language);
     compose_additional_instructions(&base, template)
@@ -601,8 +630,16 @@ Extract:
 4. Open questions (unresolved questions or unknowns that still need follow-up)
 5. Commitments (explicit promises, commitments, or owner statements made by someone)
 6. Participants (names of people present or mentioned in the conversation)
+7. Title (3-8 words, specific about the topic or outcome of the whole meeting: name the concrete products, projects or people discussed rather than a general category; never a generic title like "Meeting", "Call" or "Recording")
+
+For an empty section, leave its header with no bullet items. Never invent a
+"none", "no decisions were made" or translated absence bullet. Those are
+section states, not decisions or tasks. MICROPHONE and SYSTEM are audio-source
+labels, not participant names. Preserve substantive negative decisions.
 
 Respond in this exact format:
+
+TITLE: Specific meeting title
 
 KEY POINTS:
 - point 1
@@ -665,10 +702,25 @@ fn parse_summary_response(response: &str) -> Summary {
     let mut open_questions = Vec::new();
     let mut commitments = Vec::new();
     let mut participants_raw = Vec::new();
+    let mut titles: Vec<String> = Vec::new();
+    let mut removed_title_line = false;
     let mut current_section = "";
+    let mut fallback_lines = Vec::new();
+    let mut removed_absence = false;
 
     for line in response.lines() {
         let trimmed = line.trim();
+
+        if let Some(title) = trimmed.strip_prefix("TITLE:") {
+            current_section = "title";
+            removed_title_line = true;
+            let title = title.trim();
+            if !title.is_empty() {
+                titles.push(title.to_string());
+            }
+            continue;
+        }
+        fallback_lines.push(line);
 
         if trimmed.starts_with("KEY POINTS:") {
             current_section = "key_points";
@@ -691,7 +743,16 @@ fn parse_summary_response(response: &str) -> Summary {
         }
 
         if let Some(item) = trimmed.strip_prefix("- ") {
+            if crate::summary_semantics::is_absence_item(current_section, item) {
+                fallback_lines.pop();
+                removed_absence = true;
+                continue;
+            }
             match current_section {
+                "title" => {
+                    fallback_lines.pop();
+                    titles.push(item.trim().to_string());
+                }
                 "key_points" => key_points.push(item.to_string()),
                 "decisions" => decisions.push(item.to_string()),
                 "action_items" => action_items.push(item.to_string()),
@@ -716,9 +777,21 @@ fn parse_summary_response(response: &str) -> Summary {
         .filter(|p| !p.is_empty())
         .collect();
 
+    // One response, one title. Engines that concatenate per-chunk outputs
+    // without a synthesis call produce several; none of them names the whole
+    // meeting, so the separate title call decides instead.
+    titles.retain(|title| !title.is_empty());
+    titles.dedup();
+    let title = (titles.len() == 1).then(|| titles.remove(0));
+
     Summary {
+        title,
         text: if key_points.is_empty() {
-            response.to_string()
+            if removed_absence || removed_title_line {
+                fallback_lines.join("\n")
+            } else {
+                response.to_string()
+            }
         } else {
             String::new()
         },
@@ -729,6 +802,17 @@ fn parse_summary_response(response: &str) -> Summary {
         key_points,
         participants,
     }
+}
+
+/// Parse per-chunk outputs that were concatenated without a synthesis call.
+/// Each chunk saw only part of the meeting, so a title from any one of them
+/// would name a fragment; leave it to the separate title call instead.
+fn parse_concatenated_chunk_summaries(all_text: &str, chunk_count: usize) -> Summary {
+    let mut summary = parse_summary_response(all_text);
+    if chunk_count > 1 {
+        summary.title = None;
+    }
+    summary
 }
 
 fn summary_output_chars(summary: &Summary) -> usize {
@@ -2081,7 +2165,11 @@ fn run_summary_agent_call(
     timeout: std::time::Duration,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::io::Write;
-    let invocation = prepare_agent_invocation(agent_cmd, prompt, selected_screens, false)?;
+    // Text-only summaries run lean (no MCP servers, no tools): the prompt
+    // carries the whole transcript, and starting the user's MCP servers only
+    // adds startup time. Screenshots need the Read tool, so they stay full.
+    let lean = existing_screen_files(selected_screens).is_empty();
+    let invocation = prepare_agent_invocation(agent_cmd, prompt, selected_screens, lean)?;
     let cleanup_path = invocation.cleanup_path.clone();
 
     // AIDEV-NOTE: Use Stdio::null() when no stdin payload is needed (e.g. pi, opencode
@@ -2606,7 +2694,7 @@ fn summarize_with_openai(
         all_text.push('\n');
     }
 
-    Ok(parse_summary_response(&all_text))
+    Ok(parse_concatenated_chunk_summaries(&all_text, chunks.len()))
 }
 
 // ── Mistral API ─────────────────────────────────────────────
@@ -2858,7 +2946,7 @@ fn summarize_with_openai_compatible(
         all_text.push('\n');
     }
 
-    Ok(parse_summary_response(&all_text))
+    Ok(parse_concatenated_chunk_summaries(&all_text, chunks.len()))
 }
 
 // ── Ollama (local) ───────────────────────────────────────────
@@ -2891,7 +2979,7 @@ fn summarize_with_apple_fm(
         all_text.push('\n');
     }
 
-    Ok(parse_summary_response(&all_text))
+    Ok(parse_concatenated_chunk_summaries(&all_text, chunks.len()))
 }
 
 fn summarize_with_ollama(
@@ -2919,7 +3007,7 @@ fn summarize_with_ollama(
         all_text.push('\n');
     }
 
-    Ok(parse_summary_response(&all_text))
+    Ok(parse_concatenated_chunk_summaries(&all_text, chunks.len()))
 }
 
 // ── HTTP helper (ureq — pure Rust, no subprocess, no secrets in process args) ──
@@ -3165,88 +3253,62 @@ fn run_title_refinement_via_agent(
     prompt: &str,
     agent_cmd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    use std::io::Write;
+    run_title_refinement_via_agent_timeout(prompt, agent_cmd, std::time::Duration::from_secs(120))
+}
 
-    let invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)?;
+fn run_title_refinement_via_agent_timeout(
+    prompt: &str,
+    agent_cmd: &str,
+    timeout: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // A title is a one-line text task: lean (no MCP, no tools) like speaker mapping.
+    let invocation = prepare_agent_invocation(agent_cmd, prompt, &[], true)?;
     let cleanup_path = invocation.cleanup_path.clone();
-    // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
-    // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
-    // them block until the timeout. Null stdin closes it immediately.
-    let stdin_stdio = if invocation.stdin_payload.is_some() {
-        std::process::Stdio::piped()
-    } else {
-        std::process::Stdio::null()
-    };
-    let mut command = crate::engine_process::command(&invocation.cmd);
-    command
-        .args(&invocation.args)
-        .stdin(stdin_stdio)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // Own process group so a timeout can kill the WHOLE tree. Real agent CLIs
-    // spawn MCP servers and tool subprocesses; killing only the direct child
-    // leaves those running, and they hold the inherited stdout/stderr pipes
-    // open (#592). Mirrors run_speaker_mapping_via_agent.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().map_err(|e| {
-        if let Some(path) = cleanup_path.as_ref() {
-            let _ = std::fs::remove_file(path);
-        }
-        format!("Agent '{}' not found or failed to start: {}", agent_cmd, e)
-    })?;
-
-    if let Some(bytes) = invocation.stdin_payload.clone() {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Agent stdin unexpectedly unavailable".to_string())?;
-        std::thread::spawn(move || {
-            stdin.write_all(&bytes).ok();
+    let result = (|| {
+        let mut command = crate::bounded_child::BoundedCommand::new(&invocation.cmd);
+        command.args(&invocation.args);
+        let input = invocation.stdin_payload.map(|bytes| {
+            Box::new(std::io::Cursor::new(bytes)) as crate::bounded_child::StdinSource
         });
-    }
-
-    let timeout = std::time::Duration::from_secs(120);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output()?;
-                if let Some(path) = cleanup_path.as_ref() {
-                    let _ = std::fs::remove_file(path);
-                }
-                if !status.success() {
-                    return Err(
-                        format!("Agent '{}' exited with error", agent_label(agent_cmd)).into(),
-                    );
-                }
-                let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if response.is_empty() {
-                    return Err(format!("Agent '{}' returned empty output", agent_cmd).into());
-                }
-                return Ok(response);
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    child.kill().ok();
-                    if let Some(path) = cleanup_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    return Err(format!(
-                        "Agent '{}' timed out after {}s",
-                        agent_cmd,
-                        timeout.as_secs()
-                    )
-                    .into());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("Failed to check agent status: {}", e).into()),
+        // Reuse the audited process-tree supervisor: concurrent pipe draining,
+        // Unix group / Windows Job retirement and direct-child reaping. The
+        // existing invocation still controls arguments, authentication and tools.
+        let run = crate::bounded_child::run(
+            &mut command,
+            input,
+            crate::bounded_child::StdoutTarget::Capture {
+                max_bytes: 16 * 1024,
+            },
+            crate::bounded_child::ChildBudget {
+                wall_clock: timeout,
+                stderr_tail: 4096,
+            },
+        )?;
+        if run.timed_out {
+            return Err(format!(
+                "Agent '{}' timed out after {}s",
+                agent_label(agent_cmd),
+                timeout.as_secs()
+            )
+            .into());
         }
+        if !run.output.status.success() {
+            return Err(format!("Agent '{}' exited with error", agent_label(agent_cmd)).into());
+        }
+        let response = String::from_utf8_lossy(&run.output.stdout)
+            .trim()
+            .to_string();
+        if response.is_empty() {
+            return Err(format!("Agent '{}' returned empty output", agent_label(agent_cmd)).into());
+        }
+        Ok(response)
+    })();
+    // Prompt-file agents must clean up after every result, including spawn,
+    // input/output, timeout and retirement failures.
+    if let Some(path) = cleanup_path {
+        let _ = std::fs::remove_file(path);
     }
+    result
 }
 
 // ── Speaker mapping (Level 1) ────────────────────────────────
@@ -3762,14 +3824,14 @@ mod tests {
     #[test]
     fn cancelling_owned_chat_process_stops_descendants_before_timeout() {
         let root = tempfile::tempdir().unwrap();
-        let marker = root.path().join("should-not-exist");
+        let descendant_pid = root.path().join("descendant.pid");
         let invocation = ChatInvocation {
             cmd: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                "(sleep 2; touch \"$1\") & wait".into(),
+                "sleep 30 & printf '%s' \"$!\" > \"$1\"; wait".into(),
                 "fixture".into(),
-                marker.to_string_lossy().into_owned(),
+                descendant_pid.to_string_lossy().into_owned(),
             ],
             stdin_payload: None,
             cleanup_path: None,
@@ -3779,12 +3841,23 @@ mod tests {
             invocation,
             Some(root.path()),
             std::time::Duration::from_secs(20),
-            &|| start.elapsed() > std::time::Duration::from_millis(300),
+            // The old fixture both cancelled and wrote its failure marker at
+            // exactly two seconds, racing successful completion against cancel.
+            &|| descendant_pid.exists(),
         );
-        assert!(result.unwrap_err().starts_with("agent_cancelled:"));
+        let error = result.unwrap_err();
+        assert!(error.starts_with("agent_cancelled:"), "{error}");
         assert!(start.elapsed() < std::time::Duration::from_secs(4));
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        assert!(!marker.exists(), "descendant survived cancellation");
+        let descendant = std::fs::read_to_string(descendant_pid).unwrap();
+        let status = crate::engine_process::command("ps")
+            .args(["-o", "stat=", "-p", &descendant])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "live descendant survived cancellation: {status}"
+        );
     }
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -3889,6 +3962,153 @@ mod tests {
     }
 
     #[test]
+    fn chunk_absence_placeholders_never_become_decisions_or_fallback_summary_text() {
+        let summary = parse_summary_response("DECISIONS:\n- No decisions were made.\nDECISIONS:\n- Aucune décision spécifique n'a été prise.\nDECISIONS:\n- Keep annual billing.\n- No changes to pricing.\nACTION ITEMS:\n- None.\n- @Mat: Prepare the follow up.\n");
+        assert_eq!(
+            summary.decisions,
+            ["Keep annual billing.", "No changes to pricing."]
+        );
+        assert_eq!(summary.action_items, ["@Mat: Prepare the follow up."]);
+        assert!(!summary.text.contains("No decisions were made"));
+        assert!(!summary.text.contains("Aucune décision"));
+        assert!(!summary.text.contains("None."));
+        assert!(summary.text.contains("No changes to pricing."));
+    }
+
+    #[test]
+    fn meeting_language_resolution_respects_explicit_and_template_settings() {
+        let english = "The team reviewed the annual billing proposal and discussed the customer experience. We decided to keep the existing pricing and prepare the follow up next Tuesday. The engineering team will investigate recording quality before the next release. ".repeat(4);
+        let mut config = Config::default();
+        assert_eq!(
+            resolve_meeting_summary_config(&english, &config, None)
+                .summarization
+                .language,
+            "English"
+        );
+        config.summarization.language = "es".into();
+        assert_eq!(
+            resolve_meeting_summary_config(&english, &config, None)
+                .summarization
+                .language,
+            "es"
+        );
+        config.summarization.language = "auto".into();
+        config.transcription.language = Some("de".into());
+        assert_eq!(
+            get_effective_summary_language(&resolve_meeting_summary_config(
+                &english, &config, None
+            )),
+            "de"
+        );
+        let mut template = Template::from_str(
+            "---\nname: Test\nslug: test\nversion: 1.0.0\nlanguage: fr\n---\n",
+            crate::template::TemplateSource::Bundled,
+            None,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_meeting_summary_config(&english, &config, Some(&template))
+                .summarization
+                .language,
+            "fr"
+        );
+        template.frontmatter.language = Some("auto".into());
+        config.transcription.language = None;
+        let resolved = resolve_meeting_summary_config(&english, &config, Some(&template));
+        assert!(
+            build_system_prompt(get_effective_summary_language(&resolved), Some(&template))
+                .contains("Always respond in English")
+        );
+        assert_eq!(
+            config.summarization.language, "auto",
+            "resolution must not persist a new setting"
+        );
+    }
+
+    #[test]
+    fn every_ollama_chunk_receives_the_meeting_language_even_when_notes_are_french() {
+        let english = "The team reviewed annual billing and discussed the customer experience. We decided to keep the existing pricing and prepare the follow up document next Tuesday. Engineering will investigate recording quality before the next release.\n".repeat(8);
+        let french_notes = "Veuillez préparer le document pour les participants. Les prochaines étapes doivent être clairement identifiées pour cette réunion.";
+        let mut config = Config::default();
+        config.summarization.engine = "ollama".into();
+        config.summarization.chunk_max_tokens = 120;
+        let count = build_prompt(
+            &compose_notes_and_transcript(Some(french_notes), &english),
+            120,
+        )
+        .len();
+        assert!(count > 2);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        config.summarization.ollama_url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(15);
+            let mut prompts = Vec::new();
+            while prompts.len() < count {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "missing summary requests");
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                // Accepted sockets inherit O_NONBLOCK on macOS. The listener
+                // polls with a deadline; each complete HTTP request is read
+                // synchronously under its own bounded read timeout.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let body = loop {
+                    let mut buffer = [0_u8; 4096];
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                    let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, value)| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break bytes[end + 4..end + 4 + length].to_vec();
+                    }
+                };
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                prompts.push(body["prompt"].as_str().unwrap().to_string());
+                let item = if prompts.len() == count {
+                    "Keep annual billing."
+                } else if prompts.len() % 2 == 0 {
+                    "Aucune décision spécifique n'a été prise."
+                } else {
+                    "No decisions were made."
+                };
+                let response = serde_json::json!({"response": format!("KEY POINTS:\n- Reviewed billing.\nDECISIONS:\n- {item}\n")}).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            }
+            prompts
+        });
+        let report =
+            summarize_with_template_report(&english, Some(french_notes), &[], &config, None, None);
+        let prompts = server.join().unwrap();
+        assert!(prompts
+            .iter()
+            .all(|prompt| prompt.contains("Always respond in English")));
+        assert_eq!(report.summary.unwrap().decisions, ["Keep annual billing."]);
+    }
+
+    #[test]
     fn parse_summary_response_extracts_sections() {
         let response = "\
 KEY POINTS:
@@ -3919,10 +4139,10 @@ COMMITMENTS:
 
     #[test]
     fn parse_summary_response_handles_freeform_text() {
-        let response = "This meeting covered pricing and roadmap. No specific decisions.";
+        let response = "This meeting covered pricing and roadmap. No specific decisions.\n";
         let summary = parse_summary_response(response);
         assert!(summary.key_points.is_empty());
-        assert!(!summary.text.is_empty());
+        assert_eq!(summary.text, response);
     }
 
     #[test]
@@ -4139,6 +4359,56 @@ COMMITMENTS:
     }
 
     #[test]
+    fn parse_summary_response_reads_one_title_and_keeps_it_out_of_the_text() {
+        let summary = parse_summary_response(
+            "TITLE: Annual Billing Decision\n\nKEY POINTS:\n- Reviewed billing\n",
+        );
+        assert_eq!(summary.title.as_deref(), Some("Annual Billing Decision"));
+        assert_eq!(summary.key_points, vec!["Reviewed billing"]);
+
+        let bulleted = parse_summary_response("TITLE:\n- Pricing Review\n\nKEY POINTS:\n- A\n");
+        assert_eq!(bulleted.title.as_deref(), Some("Pricing Review"));
+
+        let freeform = parse_summary_response("TITLE: Pricing Review\nWe talked about pricing.");
+        assert_eq!(freeform.title.as_deref(), Some("Pricing Review"));
+        assert!(!freeform.text.contains("TITLE"));
+
+        assert!(parse_summary_response("KEY POINTS:\n- A\n").title.is_none());
+    }
+
+    #[test]
+    fn parse_summary_response_drops_titles_from_concatenated_chunks() {
+        // Engines without a synthesis call concatenate per-chunk outputs; no
+        // chunk title names the whole meeting.
+        let summary = parse_summary_response(
+            "TITLE: Opening Budget Talk\nKEY POINTS:\n- A\n\nTITLE: Hiring Plan Wrap-Up\nKEY POINTS:\n- B\n",
+        );
+        assert!(summary.title.is_none());
+        assert_eq!(summary.key_points, vec!["A", "B"]);
+
+        let repeated = parse_summary_response(
+            "TITLE: Hiring Plan\nKEY POINTS:\n- A\nTITLE: Hiring Plan\nKEY POINTS:\n- B\n",
+        );
+        assert_eq!(repeated.title.as_deref(), Some("Hiring Plan"));
+    }
+
+    #[test]
+    fn concatenated_chunk_outputs_never_supply_a_title() {
+        let text = "TITLE: Opening Budget Talk\nKEY POINTS:\n- A\n";
+        assert!(parse_concatenated_chunk_summaries(text, 2).title.is_none());
+        assert_eq!(
+            parse_concatenated_chunk_summaries(text, 1).title.as_deref(),
+            Some("Opening Budget Talk")
+        );
+    }
+
+    #[test]
+    fn summary_prompt_asks_for_a_title_section() {
+        let prompt = build_base_system_prompt("auto");
+        assert!(prompt.contains("TITLE: Specific meeting title"));
+    }
+
+    #[test]
     fn parse_summary_response_extracts_participants() {
         let response = "\
 KEY POINTS:
@@ -4159,6 +4429,7 @@ PARTICIPANTS:
     #[test]
     fn format_summary_produces_markdown() {
         let summary = Summary {
+            title: None,
             text: String::new(),
             key_points: vec!["Point one".into(), "Point two".into()],
             decisions: vec!["Decision A".into()],
@@ -4758,6 +5029,31 @@ PARTICIPANTS:
                 assert!(chunks.iter().all(|chunk| chunk.len() <= cap));
             }
         }
+    }
+
+    #[test]
+    fn agent_long_meeting_title_comes_from_the_synthesis_not_a_chunk() {
+        let transcript = format!(
+            "{}\n[59:00] closing discussion",
+            "opening discussion\n".repeat(6_000)
+        );
+        let result = summarize_agent_with_runner(
+            &transcript,
+            None,
+            &[],
+            "system",
+            "fake",
+            std::time::Duration::from_secs(5),
+            |prompt, _, _| {
+                if prompt.contains("<partial_summary>") {
+                    return Ok("TITLE: Whole Meeting Title\nKEY POINTS:\n- Everything".into());
+                }
+                Ok("TITLE: Chunk Fragment Title\nKEY POINTS:\n- Part".into())
+            },
+        )
+        .unwrap();
+        assert!(result.coverage.source_chunks > 1);
+        assert_eq!(result.summary.title.as_deref(), Some("Whole Meeting Title"));
     }
 
     #[test]
@@ -5562,6 +5858,48 @@ EOF
         assert!(
             start.elapsed() < std::time::Duration::from_secs(30),
             "stdin pipe regression: file-arg agent blocked waiting for EOF"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn title_timeout_retires_descendants_and_reaps_the_direct_child() {
+        let root = tempfile::tempdir().unwrap();
+        let script = write_grandchild_agent(root.path(), "title-timeout.sh",
+            "printf '%s' \"$$\" > \"$0.parent\"\nsleep 30 &\nprintf '%s' \"$!\" > \"$0.descendant\"\nwait");
+        let started = std::time::Instant::now();
+        let error = run_title_refinement_via_agent_timeout(
+            "synthetic title",
+            &script.display().to_string(),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let parent: i32 = std::fs::read_to_string(format!("{}.parent", script.display()))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant: u32 = std::fs::read_to_string(format!("{}.descendant", script.display()))
+            .unwrap()
+            .parse()
+            .unwrap();
+        // SAFETY: the PID belongs to this synthetic direct child. WNOHANG
+        // cannot block; ECHILD proves the supervisor already reaped it.
+        let result = unsafe { libc::waitpid(parent, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(result, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let status = crate::engine_process::command("ps")
+            .args(["-o", "stat=", "-p", &descendant.to_string()])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "live descendant remains: {status}"
         );
     }
 

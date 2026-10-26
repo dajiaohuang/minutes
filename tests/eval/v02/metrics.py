@@ -90,11 +90,49 @@ def critical_errors(reference: str, hypothesis: str, terms: list[dict]) -> dict:
             "reference_occurrences": sum(item["reference_occurrences"] for item in details)}
 
 
-def _max_assignment(weights: list[list[float]]) -> float:
-    """Exact bitmask assignment for <=12 speakers; no external solver."""
+def _hungarian_assignment(weights: list[list[float]]) -> float:
+    """Maximum-weight square assignment in O(n^3), using primal-dual potentials."""
     n = len(weights)
+    row_potential, column_potential = [0.] * (n + 1), [0.] * (n + 1)
+    matching, previous = [0] * (n + 1), [0] * (n + 1)
+    for row in range(1, n + 1):
+        matching[0], column = row, 0
+        minimum, used = [math.inf] * (n + 1), [False] * (n + 1)
+        while True:
+            used[column] = True
+            active_row = matching[column]
+            delta, following = math.inf, 0
+            for candidate in range(1, n + 1):
+                if used[candidate]:
+                    continue
+                cost = -weights[active_row - 1][candidate - 1] - row_potential[active_row] - column_potential[candidate]
+                if cost < minimum[candidate]:
+                    minimum[candidate], previous[candidate] = cost, column
+                if minimum[candidate] < delta:
+                    delta, following = minimum[candidate], candidate
+            for candidate in range(n + 1):
+                if used[candidate]:
+                    row_potential[matching[candidate]] += delta
+                    column_potential[candidate] -= delta
+                else:
+                    minimum[candidate] -= delta
+            column = following
+            if matching[column] == 0:
+                break
+        while column:
+            following = previous[column]
+            matching[column] = matching[following]
+            column = following
+    return sum(weights[matching[column] - 1][column - 1] for column in range(1, n + 1))
+
+
+def _max_assignment(weights: list[list[float]]) -> float:
+    """Exact bounded assignment; bitmask for small cases, Hungarian above 12."""
+    n = len(weights)
+    if n > 65:
+        raise ValueError("DER supports at most 65 distinct speakers per recording")
     if n > 12:
-        raise ValueError("DER supports at most 12 distinct speakers per recording")
+        return _hungarian_assignment(weights)
     states = {0: 0.0}
     for row in weights:
         following = {}
@@ -124,8 +162,8 @@ def diarization_error(reference: list[dict], hypothesis: list[dict], duration: f
     ref_names = sorted({s["speaker"] for s in reference})
     hyp_names = sorted({s["speaker"] for s in hypothesis})
     count = max(len(ref_names), len(hyp_names))
-    if count > 12:
-        raise ValueError("DER supports at most 12 distinct speakers per recording")
+    if count > 65:
+        raise ValueError("DER supports at most 65 distinct speakers per recording")
     weights = [[0.0] * count for _ in range(count)]
     boundaries = sorted({0.0, duration, *(s[key] for s in reference + hypothesis for key in ("start", "end"))})
     miss = false_alarm = reference_time = shared_capacity = 0.0

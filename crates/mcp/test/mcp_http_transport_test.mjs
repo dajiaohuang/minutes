@@ -140,6 +140,36 @@ async function connectHttpClient(url, name) {
   return client;
 }
 
+async function assertBoundedToolInput(client) {
+  const baseline = await client.callTool({ name: "get_status", arguments: {} });
+  assert(baseline.isError !== true, "ordinary status calls must work before input rejection");
+
+  // Each payload is well below the HTTP byte ceiling. Arrays and records can
+  // still trigger excessive validation work, so both need the SDK guard.
+  for (const padding of [
+    Array(20_000).fill(0),
+    Object.fromEntries(Array.from({ length: 20_000 }, (_, i) => [`key${i}`, 0])),
+  ]) {
+    const rejected = await client.callTool({
+      name: "get_status",
+      arguments: { padding },
+    });
+    assert(rejected.isError === true, "structurally oversized arguments must be refused");
+    const message = rejected.content.map((entry) => entry.text || "").join(" ");
+    assert(/arguments.*(?:maximum|limit|exceed)/i.test(message),
+      `expected the input-limit error, received ${message}`);
+  }
+
+  // Rejection must leave the same protocol session usable. A modest structure
+  // remains valid; get_status ignores these unknown fields after validation.
+  const healthy = await client.callTool({
+    name: "get_status",
+    arguments: { padding: Array(1_000).fill(0) },
+  });
+  assertEqual(JSON.stringify(healthy), JSON.stringify(baseline),
+    "input rejection must preserve normal calls in the same session");
+}
+
 /** POST a raw JSON-RPC body, bypassing the SDK client, to probe the guards. */
 async function rawPost(url, { body, headers = {}, method = "POST" } = {}) {
   const response = await fetch(url, {
@@ -376,6 +406,41 @@ try {
     const result = await httpClient.callTool({ name: "get_status", arguments: {} });
     assert(Array.isArray(result.content), "tool result should carry content");
     assert(result.content.length > 0, "get_status should return text content");
+  });
+
+  test("HTTP sessions reject structurally oversized tool input and remain usable", async () => {
+    await assertBoundedToolInput(httpClient);
+  });
+
+  test("stdio uses the same tool-input guard as the HTTP server factory", async () => {
+    const client = new Client({ name: "stdio-input-limit", version: "1.0.0" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [SERVER_ENTRY],
+      env: { ...process.env, RUST_LOG: "error" },
+      stderr: "ignore",
+    });
+    try {
+      await client.connect(transport);
+      await assertBoundedToolInput(client);
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  test("HTTP rejects a large envelope while existing sessions stay usable", async () => {
+    // A string counts as one structural element, so the byte ceiling is an
+    // independent guard. This envelope fit beneath the previous 4 MiB cap.
+    const response = await rawPost(server.url, {
+      body: {
+        ...INITIALIZE_BODY,
+        params: { ...INITIALIZE_BODY.params, padding: "x".repeat(1_310_720) },
+      },
+    });
+    assertEqual(response.status, 413, "an oversized envelope must be refused before SDK parsing");
+    const healthy = await httpClient.callTool({ name: "get_status", arguments: {} });
+    assert(healthy.isError !== true, "another session must remain usable after body rejection");
   });
 
   // Each session must get its own tool's response, including when both clients

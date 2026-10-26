@@ -1,6 +1,6 @@
 # Audio Device Setup Guide
 
-Minutes captures audio from whatever input device is set as the system default (or configured in `config.toml`). Different scenarios require different setups.
+For desktop meetings, choose **Meeting audio** before recording: **Microphone only** for a room meeting, or **Microphone + system audio** for a computer call. Minutes remembers the choice. The microphone picker selects your input device; it does not add the other side of a call by itself.
 
 ## Quick reference
 
@@ -8,8 +8,9 @@ Minutes captures audio from whatever input device is set as the system default (
 |----------|-------------|--------------|
 | In-person meeting | Built-in Microphone | None |
 | External USB mic (Blue Yeti, Rode, etc.) | Your mic name | Plug in, select in System Settings > Sound > Input |
-| Zoom / Teams / Meet call (desktop app) | Native call capture | None. Grant Screen Recording + Microphone permission, record from the "Call detected" banner (see below) |
-| Zoom / Meet / Teams call (CLI or manual) | BlackHole 2ch | Install BlackHole + Multi-Output Device (see below) |
+| Zoom / Teams / Meet call (desktop app, macOS 15+) | Microphone + system audio | Grant Screen Recording + Microphone permission; call detection is optional |
+| Zoom / Meet / Teams call (CLI, macOS 14.4+) | Core Audio Process Tap + microphone | Configure both backend and call source (see below) |
+| Computer call with loopback devices | Separate microphone + BlackHole 2ch | Install BlackHole + Multi-Output Device (see below) |
 | iPhone voice memo | N/A (file-based) | Configure folder watcher |
 
 ## Capturing system audio (Zoom, Meet, Teams)
@@ -17,14 +18,25 @@ Minutes captures audio from whatever input device is set as the system default (
 **Desktop app (recommended, macOS 15+): you do not need BlackHole.** The desktop app records both your microphone and the call's audio natively using ScreenCaptureKit, with no virtual audio device. To use it:
 
 1. Grant Minutes **Screen Recording** and **Microphone** permission in System Settings > Privacy & Security.
-2. Join your call. Minutes detects Zoom, Microsoft Teams (desktop), and Webex by default and shows a **"Call detected"** banner. Click **Record** on that banner to start native call capture (it writes separate mic and system stems and mixes them).
-3. **Google Meet and Teams-in-browser** are opt-in: enable the experimental Google Meet / Teams-web detection toggles in Settings. Browser detection may also prompt for Automation permission.
+2. Select **Meeting**, choose **Microphone + system audio**, and click **Start**. This works without a detected call or an open call banner. System audio includes other apps that play sound, so silence notifications if needed.
+3. During capture, check the separate microphone and call-audio indicators. If native capture cannot start, Minutes stops with an error; it does not silently switch to microphone-only recording.
 
-Note: a plain recording started without the call banner captures your microphone only. Use the banner's **Record** button (call intent) for both sides of the call.
+Call detection is an optional convenience: Zoom, Microsoft Teams desktop and Webex are enabled by default. Google Meet and Teams-in-browser detection are opt-in in Settings and may require Automation permission. The banner's **Record** action explicitly starts call capture, regardless of the saved room-meeting choice. Tray and shortcut Meeting starts use the saved choice; a new installation asks you to choose before starting. Memos always use the microphone.
 
-**CLI or manual fallback (any macOS): BlackHole.** The command-line `minutes record` cannot use native call capture, so to record system audio there you route it through BlackHole, a free virtual audio device. The same applies if you prefer manual routing over the desktop app.
+**CLI on macOS 14.4+: Core Audio Process Tap.** The CLI has an independent native system-audio backend. Configure both keys:
 
-### 1. Install BlackHole
+```toml
+[recording]
+capture_backend = "core-audio-tap"
+
+[recording.sources]
+voice = "default"
+call = "auto"
+```
+
+Then run `minutes record --call`. Process Tap uses system-audio access rather than the desktop helper's Screen Recording route. See [Core Audio Process Tap](core-audio-process-tap.md) for platform and permission details. The desktop Meeting choice does not change CLI defaults.
+
+**Loopback fallback:** BlackHole is an alternative for older macOS or an explicit loopback setup. To retain both sides, configure separate voice and call sources rather than selecting BlackHole as your only input.
 
 ### 1. Install BlackHole
 
@@ -46,17 +58,21 @@ This lets you hear the call AND record it simultaneously:
 
 ### 3. Configure Minutes
 
-Either set BlackHole as the system default input in System Settings > Sound > Input, or configure it in Minutes:
+Configure a microphone and a separate BlackHole call source:
 
 ```toml
 # ~/.config/minutes/config.toml
 [recording]
-device = "BlackHole 2ch"
+capture_backend = "cpal"
+
+[recording.sources]
+voice = "default"
+call = "BlackHole 2ch"
 ```
 
 Or pass it per-recording:
 ```bash
-minutes record --device "BlackHole 2ch" --title "Team standup"
+minutes record --call --title "Team standup"
 ```
 
 ### 4. After the call
@@ -82,7 +98,7 @@ Files are moved to `~/meetings/memos/processed/` after transcription.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Empty transcript | Wrong input device selected | Check System Settings → Sound → Input |
-| Only your voice, not the call | BlackHole not set up | Follow the Multi-Output Device steps above |
+| Only your voice, not the call | Microphone-only route selected | Choose Microphone + system audio in the desktop app; for CLI, configure a separate call source |
 | Echo in recording | Recording both mic + system audio | Mute your mic in the call app if you only want call audio |
 | BlackHole disappeared | macOS update removed it | `brew reinstall blackhole-2ch` |
 | Recording is mono/low quality | Source audio is compressed VoIP | Normal — VoIP audio is always lower quality than in-person |

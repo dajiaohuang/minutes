@@ -11,10 +11,10 @@ fi
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
-# decision. Packaging is fixed for opt-in local builds: sherpa links statically
-# and the existing ort path does not leave dangling runtime dylib references.
+# decision. Opt-in engine-sherpa builds ship the isolated plugin and its private
+# shared libraries together.
 # Opt in explicitly:
-#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort   # engine-sherpa conflicts with diarize/vad-ort on macOS (#683)
+#   MINUTES_BUILD_FEATURES=parakeet,metal,engine-sherpa
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
     MINUTES_BUILD_FEATURES="parakeet,metal"
 fi
@@ -111,6 +111,16 @@ APP_BUNDLE="target/release/bundle/macos/Minutes.app"
 # `minutes-${HOST_TARGET}`. Both the package input ($HOST_TARGET file in
 # tauri/src-tauri/bin/) and the bundled output (plain `minutes`) are required.
 SIDECAR="${APP_BUNDLE}/Contents/MacOS/minutes"
+if [[ ",$MINUTES_BUILD_FEATURES," == *,engine-sherpa,* ]]; then
+    (cd crates/sherpa-plugin && cargo build --release --locked)
+    for lib in libminutes_sherpa.dylib libsherpa-onnx-c-api.dylib libonnxruntime.dylib; do
+        cp -f "crates/sherpa-plugin/target/release/$lib" "$APP_BUNDLE/Contents/MacOS/$lib"
+        codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/$lib"
+    done
+fi
+(cd crates/embed-worker && cargo build --release --locked)
+cp -f crates/embed-worker/target/release/minutes-embed-worker "$APP_BUNDLE/Contents/MacOS/minutes-embed-worker"
+codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/minutes-embed-worker"
 if [[ -f "$SIDECAR" ]]; then
     codesign --force --options runtime \
         --entitlements tauri/src-tauri/minutes-cli.entitlements \

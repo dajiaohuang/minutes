@@ -18,5 +18,8 @@
     "react-dom": "^19.2.4",
     "remotion": "^4.0.446",
     "typescript": "^6.0.2"
+  },
+  "overrides": {
+    "zod": "4.6.7"
   }
 }

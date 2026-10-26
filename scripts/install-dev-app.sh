@@ -7,10 +7,10 @@ cd "$ROOT_DIR"
 export CXXFLAGS="${CXXFLAGS:-"-I$(xcrun --show-sdk-path)/usr/include/c++/v1"}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
-# decision. Packaging is fixed for opt-in local builds: sherpa links statically
-# and the existing ort path does not leave dangling runtime dylib references.
+# decision. Opt-in engine-sherpa builds ship the isolated plugin and its private
+# shared libraries together.
 # Opt in explicitly:
-#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort   # engine-sherpa conflicts with diarize/vad-ort on macOS (#683)
+#   MINUTES_BUILD_FEATURES=parakeet,metal,engine-sherpa
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
     MINUTES_BUILD_FEATURES="parakeet,metal"
 fi
@@ -50,7 +50,9 @@ installed_dev_pids() {
     {
       pid = $1
       sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
-      if ($0 == executable) print pid
+      # The installed app may have development/test arguments. Match the
+      # executable boundary, excluding similarly named bundles or binaries.
+      if ($0 == executable || index($0, executable " ") == 1) print pid
     }
   '
 }
@@ -70,6 +72,18 @@ stop_idle_installed_dev_app() {
   if [[ -z "$PREVIOUS_DEV_PIDS" ]]; then
     return
   fi
+
+  # A custom launch can use a different data/config root. The CLI status
+  # probe below cannot establish that profile's idle state. Refuse replacement
+  # until its owner has checked and quit it rather than targeting the wrong PID.
+  for existing_pid in $PREVIOUS_DEV_PIDS; do
+    local existing_command
+    existing_command="$(ps -p "$existing_pid" -o command=)"
+    if [[ "$existing_command" != "$INSTALL_APP/Contents/MacOS/minutes-app" ]]; then
+      echo "Error: installed ${DEV_PRODUCT_NAME}.app PID $existing_pid has custom launch arguments; its activity profile is unverified. Check and quit that instance before installing." >&2
+      exit 1
+    fi
+  done
 
   if installed_dev_work_is_active; then
     echo "Error: ${DEV_PRODUCT_NAME}.app is recording or processing. Stop active work before replacing the installed app." >&2
@@ -188,6 +202,19 @@ echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # rejects it against the other members. Outputs are unaffected: target/ is
 # workspace-level, so $BUILD_APP below is still correct from the root.
 (cd tauri/src-tauri && run_with_ort_retry cargo tauri build --bundles app --config "$ROOT_DIR/$DEV_CONFIG" --features "$MINUTES_BUILD_FEATURES" --no-sign)
+# Match the released shared-engine layout in opt-in native dogfood builds.
+if [[ ",$MINUTES_BUILD_FEATURES," == *,engine-sherpa,* ]]; then
+  (cd crates/sherpa-plugin && cargo build --release --locked)
+  for lib in libminutes_sherpa.dylib libsherpa-onnx-c-api.dylib libonnxruntime.dylib; do
+    cp -f "crates/sherpa-plugin/target/release/$lib" "$BUILD_APP/Contents/MacOS/$lib"
+    chmod 755 "$BUILD_APP/Contents/MacOS/$lib"
+  done
+fi
+# Semantic search worker: its own process with a pinned llama.cpp, found by
+# the app beside its own binary. Signed below with the other nested binaries.
+(cd crates/embed-worker && cargo build --release --locked)
+cp -f crates/embed-worker/target/release/minutes-embed-worker "$BUILD_APP/Contents/MacOS/minutes-embed-worker"
+chmod 755 "$BUILD_APP/Contents/MacOS/minutes-embed-worker"
 # Inside-out signing (#311): sign every nested executable FIRST (the CLI
 # sidecar with its own entitlements), then the outer bundle WITHOUT --deep.
 # --deep re-signs nested code with the outer entitlements (clobbering the

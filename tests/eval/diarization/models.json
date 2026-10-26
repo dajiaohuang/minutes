@@ -1,0 +1,15 @@
+{
+  "attribution": "pyannote Community-1, CC-BY-4.0; ONNX conversion by altunenes. See https://huggingface.co/pyannote/speaker-diarization-community-1 and https://huggingface.co/altunenes/speaker-diarization-community-1-onnx",
+  "files": [
+    {
+      "name": "segmentation-community-1.onnx",
+      "url": "https://huggingface.co/altunenes/speaker-diarization-community-1-onnx/resolve/main/segmentation-community-1.onnx",
+      "sha256": "62d59a487d8ba877d0bd1638c53aa06a810bdb104fb776a27ec2204521711006"
+    },
+    {
+      "name": "embedding-community-1.onnx",
+      "url": "https://huggingface.co/altunenes/speaker-diarization-community-1-onnx/resolve/main/embedding_model.onnx",
+      "sha256": "b62448ababb2ee9fc1ce51870553507893ea427fb1fd77e199af425ff1ed0677"
+    }
+  ]
+}

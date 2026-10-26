@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "task": "diarization",
+  "provenance": {
+    "independent_blinding": false,
+    "synthetic": false,
+    "selection": "Two complete standard AMI test meetings; engineering regression holdout, not model-training independence."
+  },
+  "gates": {
+    "minimum_der_improvement": 0.05,
+    "maximum_recording_regression": 0.03,
+    "maximum_real_time_factor": 0.25
+  },
+  "recordings": [
+    {
+      "id": "IS1009a",
+      "audio": "IS1009a.Array1-01.wav",
+      "sha256": "23fd54fd6dbe23870f10317b256f7c648fe0fd587e56d2f940840309f1578b60",
+      "reference": "IS1009a.rttm",
+      "reference_sha256": "ba38d35ca567f3f1e061d90fdc33579ce60d2060fc8664eaeb77d2e0fcd88b01",
+      "duration": 838.9973125,
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Meeting Corpus, AMI Project; RTTM conversion: pyannote/AMI-diarization-setup, 67c2d539286e89f68952d5dcf83912bd9f01dfae"
+      },
+      "split": "holdout",
+      "conditions": {
+        "language": "en",
+        "microphone": "Array1-01",
+        "human": true
+      }
+    },
+    {
+      "id": "TS3003a",
+      "audio": "TS3003a.Array1-01.wav",
+      "sha256": "46f81fb403e40a98c1b694c842404c0db24f3a6c67397b247faf0d3f42cf9163",
+      "reference": "TS3003a.rttm",
+      "reference_sha256": "57137f098ee3be9b8d77c9faa4b16e9155e821bdbf21b974dd8771d7e646d185",
+      "duration": 1505.642625,
+      "authorization": {
+        "basis": "license",
+        "reference": "https://groups.inf.ed.ac.uk/ami/",
+        "license": "CC-BY-4.0",
+        "attribution": "AMI Meeting Corpus, AMI Project; RTTM conversion: pyannote/AMI-diarization-setup, 67c2d539286e89f68952d5dcf83912bd9f01dfae"
+      },
+      "split": "holdout",
+      "conditions": {
+        "language": "en",
+        "microphone": "Array1-01",
+        "human": true
+      }
+    }
+  ]
+}

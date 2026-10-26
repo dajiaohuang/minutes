@@ -122,6 +122,16 @@ pub fn install_apple_speech_worker_service(
         .map_err(|_| "Apple Speech worker authority was already installed".to_string())
 }
 
+/// Whether this process can bind the signed worker authority, which is what the
+/// product transport gate means. Cached for the life of the process: the answer
+/// depends only on this process's own code signature and its bundle, and the
+/// desktop installs the authority before any surface asks.
+#[cfg(target_os = "macos")]
+pub(crate) fn signed_worker_authority_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| authority().is_ok())
+}
+
 // The product dictation/live callers sit behind their own feature gates, and
 // the signed-acceptance path now uses the echo probe instead of this. It is
 // live product code under those feature sets and unused in lean builds, so
@@ -255,10 +265,11 @@ pub(crate) fn transport_acceptance_probe(
     })
 }
 
-/// Exercise the exact signed parent -> authenticated XPC -> worker byte path
-/// without making Apple Speech selectable by normal product configuration. The
-/// input is a fixed synthetic canary and this entrypoint accepts no audio,
-/// path, or executable from the caller.
+/// Exercise the exact signed parent -> authenticated XPC -> worker byte path.
+/// The input is a fixed synthetic canary and this entrypoint accepts no audio,
+/// path, or executable from the caller. It also proves the product gate opened
+/// for exactly the surface it should: standalone live transcript selects Apple
+/// Speech in this trusted build, and dictation stays on Whisper.
 ///
 /// The worker returns a content receipt proving the exact bytes crossed the
 /// authenticated transport, and never constructs a Speech type. A hosted CI
@@ -270,11 +281,11 @@ pub(crate) fn transport_acceptance_probe(
 /// analyzer did not run; the receipt must not imply otherwise.
 #[cfg(target_os = "macos")]
 pub fn run_signed_transport_acceptance() -> Result<bool, String> {
-    if crate::pipeline::apple_speech_private_audio_transport_supported() {
-        return Err("Apple Speech product selection must remain closed during acceptance".into());
-    }
     if !crate::macos_graph_xpc::current_process_is_trusted_distribution() {
         return Err("Apple Speech transport acceptance requires a trusted signed app".into());
+    }
+    if !crate::pipeline::apple_speech_private_audio_transport_supported() {
+        return Err("Apple Speech product gate did not open for a trusted signed app".into());
     }
     // The worker installs its peer requirement from the same verdict, so a
     // trusted parent means the anchored form was used or the worker failed
@@ -296,15 +307,7 @@ pub fn run_signed_transport_acceptance() -> Result<bool, String> {
         );
     }
 
-    // Retained product configuration must still resolve through the same
-    // always-compiled gate to Whisper.
-    let mut config = crate::config::Config::default();
-    config.live_transcript.backend = "apple-speech".to_string();
-    if crate::pipeline::resolved_apple_speech_backend(config.effective_live_transcript_backend())
-        != "whisper"
-    {
-        return Err("Apple Speech acceptance did not preserve the product Whisper fallback".into());
-    }
+    product_gate_scope()?;
     Ok(receipt.runtime_supported)
 }
 
@@ -312,14 +315,14 @@ pub fn run_signed_transport_acceptance() -> Result<bool, String> {
 /// Speech analyzer path on real macOS hardware. The caller cannot supply audio,
 /// a path, a locale, or any worker configuration: the input is the checked-in
 /// public fixture embedded into the parent at compile time. Only content-free
-/// metrics leave this function, and the normal product gate must remain closed.
+/// metrics leave this function.
 #[cfg(target_os = "macos")]
 pub fn run_signed_runtime_acceptance() -> Result<SignedRuntimeAcceptanceReceipt, String> {
-    if crate::pipeline::apple_speech_private_audio_transport_supported() {
-        return Err("Apple Speech product selection must remain closed during acceptance".into());
-    }
     if !crate::macos_graph_xpc::current_process_is_trusted_distribution() {
         return Err("Apple Speech runtime acceptance requires a trusted signed app".into());
+    }
+    if !crate::pipeline::apple_speech_private_audio_transport_supported() {
+        return Err("Apple Speech product gate did not open for a trusted signed app".into());
     }
     println!("apple-speech-signed-parent-trusted=true");
 
@@ -344,13 +347,7 @@ pub fn run_signed_runtime_acceptance() -> Result<SignedRuntimeAcceptanceReceipt,
         return Err("signed Apple Speech worker did not produce a valid bounded transcript".into());
     }
 
-    let mut config = crate::config::Config::default();
-    config.live_transcript.backend = "apple-speech".to_string();
-    if crate::pipeline::resolved_apple_speech_backend(config.effective_live_transcript_backend())
-        != "whisper"
-    {
-        return Err("Apple Speech acceptance did not preserve the product Whisper fallback".into());
-    }
+    product_gate_scope()?;
 
     Ok(SignedRuntimeAcceptanceReceipt {
         module_id: result.module_id,
@@ -359,6 +356,30 @@ pub fn run_signed_runtime_acceptance() -> Result<SignedRuntimeAcceptanceReceipt,
         first_result_elapsed_ms: result.first_result_elapsed_ms,
         total_elapsed_ms: result.total_elapsed_ms,
     })
+}
+
+/// The product gate opens standalone live transcript and nothing else. Both
+/// acceptance routes print the verdict so the signed harness can require it.
+#[cfg(target_os = "macos")]
+fn product_gate_scope() -> Result<(), String> {
+    let mut config = crate::config::Config::default();
+    config.live_transcript.backend = "apple-speech".to_string();
+    if crate::pipeline::resolved_apple_speech_backend(config.effective_live_transcript_backend())
+        != "apple-speech"
+    {
+        return Err(
+            "Apple Speech acceptance did not select Apple Speech for standalone live transcript"
+                .into(),
+        );
+    }
+    if crate::pipeline::apple_speech_dictation_selectable() {
+        return Err(
+            "Apple Speech acceptance found dictation selectable; it must stay on Whisper".into(),
+        );
+    }
+    println!("apple-speech-live-product-gate=open");
+    println!("apple-speech-dictation-product-gate=closed");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

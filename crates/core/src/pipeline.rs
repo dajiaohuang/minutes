@@ -325,6 +325,7 @@ const SILENT_REMOTE_WARNING_MESSAGE: &str =
     "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
 const SILENT_MICROPHONE_WARNING_MESSAGE: &str =
     "Microphone audio was not captured (mic stem silent or missing); transcript reflects only call/remote audio";
+const MIXED_WAV_RECOVERY_CODE: &str = "native-call-mixed-wav-recovery";
 
 fn warning_is_native_call_system_stem_recovery(warning: &markdown::CaptureWarning) -> bool {
     match &warning.kind {
@@ -359,6 +360,17 @@ fn detect_silent_remote_stem_warning(
     }
 
     let health = recording_health?;
+    if let Some(warning) = health.capture_warnings.iter().find(|warning| {
+        matches!(&warning.kind, diarize::FailureKind::Other { code }
+            if code == MIXED_WAV_RECOVERY_CODE)
+    }) {
+        return Some(ProcessingWarning {
+            step: "capture".to_string(),
+            reason: "source_tracks_unusable".to_string(),
+            timeout_secs: None,
+            message: Some(warning.message.clone()),
+        });
+    }
     if health
         .capture_warnings
         .iter()
@@ -1694,10 +1706,32 @@ pub const fn parakeet_private_audio_transport_supported() -> bool {
 
 /// Whether this exact running app can authenticate the bundled one-purpose
 /// Apple Speech XPC service before sending private utterance bytes.
+///
+/// True only inside a trusted signed Minutes app whose embedded worker
+/// authority binds: Developer ID distribution, the integrity manifest matching
+/// the worker cdhash embedded at build time, and the peer-requirement XPC API.
+/// Source, ad-hoc, and symlinked CLI processes stay false and keep the sealed
+/// Whisper path. Each surface layers its own selection policy on top: today
+/// only standalone live transcript selects Apple Speech
+/// (see [`apple_speech_dictation_selectable`]; batch always resolves to Whisper).
 pub fn apple_speech_private_audio_transport_supported() -> bool {
-    // The service implementation and packaging are present, but product
-    // selection remains fail-closed until the exact reviewed SHA passes the
-    // separately authorized signed-macOS hostile-holder/runtime gate.
+    #[cfg(target_os = "macos")]
+    {
+        crate::apple_speech_worker::signed_worker_authority_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether dictation may send utterances to Apple Speech.
+///
+/// Stays false even when the transport is available. The activation plan
+/// orders surfaces live transcript, then batch, then dictation
+/// (docs/plans/apple-speech-activation-2026-08-10.md), and only live transcript
+/// has been opened so far.
+pub const fn apple_speech_dictation_selectable() -> bool {
     false
 }
 
@@ -2176,7 +2210,11 @@ impl PrivateAudioTempFile {
 
 enum PreparedTranscriptionInput {
     Original,
+    OriginalWavRecovery {
+        recording_health: markdown::RecordingHealth,
+    },
     Mixed(AuthorizedProcessAudioInput),
+    IndependentStems(diarize::StemPaths),
     SingleStem {
         path: std::path::PathBuf,
         recording_health: markdown::RecordingHealth,
@@ -2186,7 +2224,9 @@ enum PreparedTranscriptionInput {
 impl PreparedTranscriptionInput {
     fn processing_path(&self, original: &Path) -> PathBuf {
         match self {
-            Self::Original => original.to_path_buf(),
+            Self::Original | Self::OriginalWavRecovery { .. } | Self::IndependentStems(_) => {
+                original.to_path_buf()
+            }
             Self::Mixed(handle) => handle.processing_path().to_path_buf(),
             Self::SingleStem { path, .. } => path.clone(),
         }
@@ -2199,7 +2239,10 @@ impl PreparedTranscriptionInput {
     fn internal_authority(&self) -> Option<&AuthorizedProcessAudioInput> {
         match self {
             Self::Mixed(input) => Some(input),
-            Self::Original | Self::SingleStem { .. } => None,
+            Self::Original
+            | Self::OriginalWavRecovery { .. }
+            | Self::SingleStem { .. }
+            | Self::IndependentStems(_) => None,
         }
     }
 
@@ -2207,17 +2250,46 @@ impl PreparedTranscriptionInput {
         match self {
             Self::SingleStem {
                 recording_health, ..
-            } => Some(recording_health),
-            Self::Original | Self::Mixed(_) => None,
+            }
+            | Self::OriginalWavRecovery { recording_health } => Some(recording_health),
+            Self::Original | Self::Mixed(_) | Self::IndependentStems(_) => None,
         }
     }
 
     fn diarization_audio_path(&self) -> Option<&Path> {
         match self {
             Self::SingleStem { path, .. } => Some(path),
-            Self::Original | Self::Mixed(_) => None,
+            Self::Original
+            | Self::OriginalWavRecovery { .. }
+            | Self::Mixed(_)
+            | Self::IndependentStems(_) => None,
         }
     }
+}
+
+/// Only recover a normal WAV before ASR, when no separate source is usable.
+/// Never use this for MOV (the dual-track duration bug), authorized anonymous
+/// inputs, or a decoder/model failure after independent recognition starts.
+fn recover_original_mixed_wav(audio_path: &Path) -> Option<PreparedTranscriptionInput> {
+    if crate::diarize::classify_stem_signal(audio_path) != crate::diarize::StemSignal::Signal {
+        return None;
+    }
+    let recording_health = markdown::RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![markdown::CaptureWarning {
+            kind: diarize::FailureKind::Other { code: MIXED_WAV_RECOVERY_CODE.into() },
+            source: diarize::CaptureSource::Both,
+            message: "Separate microphone and call/remote tracks could not be used. The original mixed WAV was preserved and used for transcription; coverage of both sides cannot be verified, and source labels are unavailable.".into(),
+            diagnostic_confidence: diarize::DiagnosticConfidence::Inferred,
+        }],
+        diarization_path: Some(markdown::DiarizationPath::None),
+    };
+    tracing::warn!(
+        "unusable source tracks; recovering original mixed WAV with a recording-health warning"
+    );
+    Some(PreparedTranscriptionInput::OriginalWavRecovery { recording_health })
 }
 
 /// Dispatch a prepared source without erasing its authority. Ambient originals
@@ -2225,6 +2297,11 @@ impl PreparedTranscriptionInput {
 /// stays bound to the typed private capability accepted by the authorized
 /// coordinator entry. A caller-supplied proof authority takes precedence and
 /// is independently revalidated by that entry.
+struct PreparedTranscriptionResult {
+    transcription: crate::transcribe::TranscribeResult,
+    sources: Option<crate::source_transcript::SourceTranscript>,
+}
+
 fn transcribe_prepared_input_with_hints(
     prepared: &PreparedTranscriptionInput,
     original: &Path,
@@ -2232,22 +2309,81 @@ fn transcribe_prepared_input_with_hints(
     content_type: ContentType,
     config: &Config,
     decode_hints: crate::transcribe::DecodeHints,
-) -> Result<crate::transcribe::TranscribeResult, crate::error::TranscribeError> {
-    if let Some(authority) = input_authority.or_else(|| prepared.internal_authority()) {
-        crate::transcription_coordinator::transcribe_authorized_path_for_content_with_hints(
-            authority,
-            content_type,
-            config,
-            decode_hints,
-        )
-    } else {
-        crate::transcription_coordinator::transcribe_path_for_content_with_hints(
-            &prepared.processing_path(original),
-            content_type,
-            config,
-            decode_hints,
-        )
+) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
+    if input_authority.is_none() {
+        if let PreparedTranscriptionInput::IndependentStems(stems) = prepared {
+            // Sequential calls bound model memory; this is final processing,
+            // never the live capture/optional-consumer path. A short response
+            // on one track must not fail the whole meeting's word threshold.
+            let mut source_config = config.clone();
+            source_config.transcription.min_words = 0;
+            return transcribe_independent_stems(stems, |path| {
+                crate::transcription_coordinator::transcribe_path_for_content_with_hints(
+                    path,
+                    content_type,
+                    &source_config,
+                    decode_hints
+                        .clone()
+                        .with_audio_format_extension("wav")
+                        .with_source_timeline(),
+                )
+            });
+        }
     }
+    let transcription =
+        if let Some(authority) = input_authority.or_else(|| prepared.internal_authority()) {
+            crate::transcription_coordinator::transcribe_authorized_path_for_content_with_hints(
+                authority,
+                content_type,
+                config,
+                decode_hints,
+            )
+        } else {
+            crate::transcription_coordinator::transcribe_path_for_content_with_hints(
+                &prepared.processing_path(original),
+                content_type,
+                config,
+                decode_hints,
+            )
+        }?;
+    Ok(PreparedTranscriptionResult {
+        transcription,
+        sources: None,
+    })
+}
+
+fn transcribe_independent_stems(
+    stems: &diarize::StemPaths,
+    mut transcribe: impl FnMut(
+        &Path,
+    ) -> Result<
+        crate::transcribe::TranscribeResult,
+        crate::error::TranscribeError,
+    >,
+) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
+    let mut run = |path: &Path| match transcribe(path) {
+        Ok(result) => Ok(result),
+        // Signal is not proof of speech: one valid track can contain only
+        // noise. Keep the other track, but never suppress a decoder/model error
+        // or silently retry mixed audio after failure on an audible source.
+        Err(
+            crate::error::TranscribeError::EmptyAudio
+            | crate::error::TranscribeError::EmptyTranscript(_),
+        ) => Ok(crate::transcribe::TranscribeResult {
+            text: String::new(),
+            stats: Default::default(),
+            segments: vec![],
+            detected_language: None,
+        }),
+        Err(error) => Err(error),
+    };
+    let voice = run(&stems.voice)?;
+    let system = run(&stems.system)?;
+    let (transcription, sources) = crate::source_transcript::merge_sources(voice, system);
+    Ok(PreparedTranscriptionResult {
+        transcription,
+        sources: Some(sources),
+    })
 }
 
 /// Prepare the input handed to the transcription coordinator, working around
@@ -2259,9 +2395,10 @@ fn transcribe_prepared_input_with_hints(
 /// garbled samples and emits gibberish. A stopped or crashed capture can leave
 /// valid payload behind placeholder RIFF/data lengths; verified recoverable
 /// headers are repaired before the shared diarization classifier runs. When
-/// both stems are usable, this helper mixes them into a 16kHz mono PCM via
-/// `ffmpeg amix` and returns a prepared input to the transcriber. When
-/// both stems are usable, the mixed handle's `Drop` impl retires the anonymous
+/// both stems are usable for a meeting, they are recognized independently
+/// (#1176), including dual-source WAV recordings. Other content types retain
+/// the original 16kHz mono `ffmpeg amix` workaround. The mixed handle's `Drop`
+/// impl retires the anonymous
 /// or sealed capability on success, Err, panic, or any future early-return;
 /// no plaintext filesystem path is published. When exactly one
 /// stem is usable, the surviving PCM is returned directly with explicit
@@ -2272,7 +2409,8 @@ fn transcribe_prepared_input_with_hints(
 ///   or it is a `.mov` with no sibling stems at all (treated as an ordinary
 ///   non-native-call container; the caller hands the original path to the
 ///   transcriber and accepts whatever the decoder does with it).
-/// - `Ok(Mixed(handle))` — both native-call stems mixed cleanly.
+/// - `Ok(IndependentStems(paths))` — both meeting sources remain separate.
+/// - `Ok(Mixed(handle))` — both non-meeting native-call stems mixed cleanly.
 /// - `Ok(SingleStem { .. })` — exactly one native-call stem contains signal;
 ///   transcribe it directly and surface the attached health warning.
 /// - `Err(MinutesError::Transcribe(NativeCaptureStemMixUnavailable))` — input is
@@ -2293,21 +2431,34 @@ fn prepare_transcription_input(
     prepare_transcription_input_with_format(audio_path, None)
 }
 
+#[cfg(test)]
 fn prepare_transcription_input_with_format(
     audio_path: &Path,
     format_extension: Option<&str>,
 ) -> Result<PreparedTranscriptionInput, MinutesError> {
-    // Only `.mov` containers can hit the 2x decode bug. Everything else is
-    // either a clean PCM wav (Jake's manual reprocess flow), a single-stream
-    // m4a/mp3/ogg (voice memos), or a format that does not exercise the
-    // SCRecordingOutput dual-track path.
+    prepare_transcription_input_for_content(audio_path, format_extension, ContentType::Memo)
+}
+
+fn prepare_transcription_input_for_content(
+    audio_path: &Path,
+    format_extension: Option<&str>,
+    content_type: ContentType,
+) -> Result<PreparedTranscriptionInput, MinutesError> {
+    // MOV needs the duration workaround; dual-source WAV meetings also need
+    // independent ASR. Single-source recordings retain their ordinary decoder.
     let ext = format_extension.map(str::to_lowercase).or_else(|| {
         audio_path
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_lowercase)
     });
-    if ext.as_deref() != Some("mov") {
+    let independent_wav = content_type == ContentType::Meeting
+        && ext.as_deref() == Some("wav")
+        && !audio_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.ends_with(".voice") || stem.ends_with(".system"));
+    if ext.as_deref() != Some("mov") && !independent_wav {
         return Ok(PreparedTranscriptionInput::Original);
     }
 
@@ -2335,14 +2486,25 @@ fn prepare_transcription_input_with_format(
     // zero-byte-stem check via `stem_has_audio` that catches partial-crash
     // wavs (.exists() alone accepts them; `stem_has_audio` requires a valid
     // hound-readable header with non-zero sample/channel counts).
-    let checked = crate::diarize::discover_stem_plan_checked(&canonical).map_err(|reason| {
-        crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
-            reason: format!(
-                "native call stem validation failed for {}: {reason}",
-                canonical.display()
-            ),
+    let checked = match crate::diarize::discover_stem_plan_checked(&canonical) {
+        Ok(checked) => checked,
+        Err(reason) => {
+            if independent_wav {
+                if let Some(recovered) = recover_original_mixed_wav(&canonical) {
+                    return Ok(recovered);
+                }
+            }
+            return Err(
+                crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                    reason: format!(
+                        "native call stem validation failed for {}: {reason}",
+                        canonical.display()
+                    ),
+                }
+                .into(),
+            );
         }
-    })?;
+    };
     let invalid_sibling = checked.invalid_sibling;
 
     let stems = match checked.plan {
@@ -2424,6 +2586,11 @@ fn prepare_transcription_input_with_format(
                             });
                         }
                         crate::diarize::StemSignal::Invalid(reason) => {
+                            if independent_wav {
+                                if let Some(recovered) = recover_original_mixed_wav(&canonical) {
+                                    return Ok(recovered);
+                                }
+                            }
                             return Err(
                                 crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
                                     reason: format!(
@@ -2437,6 +2604,11 @@ fn prepare_transcription_input_with_format(
                         crate::diarize::StemSignal::Silence => {}
                     }
                     if voice.exists() || system.exists() {
+                        if independent_wav {
+                            if let Some(recovered) = recover_original_mixed_wav(&canonical) {
+                                return Ok(recovered);
+                            }
+                        }
                         return Err(crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
                             reason: format!(
                                 "native call capture at {} has no usable PCM stem: voice={}, system={}. Both stems are missing, empty, invalid, or digitally silent.",
@@ -2458,6 +2630,11 @@ fn prepare_transcription_input_with_format(
             return Ok(PreparedTranscriptionInput::Original);
         }
     };
+
+    if content_type == ContentType::Meeting {
+        tracing::info!("transcribing native microphone and system stems independently");
+        return Ok(PreparedTranscriptionInput::IndependentStems(stems));
+    }
 
     let mut raw_pcm =
         PrivateAudioTempFile::new("minutes-stem-mix-pcm-", ".s16le").map_err(|error| {
@@ -3206,6 +3383,7 @@ pub struct TranscriptArtifact {
     /// transcription. Diarization must reuse it rather than reopening the
     /// dual-track `.mov` that recovery deliberately bypassed.
     diarization_audio_path: Option<std::path::PathBuf>,
+    source_transcript: Option<crate::source_transcript::SourceTranscript>,
 }
 
 impl std::fmt::Debug for TranscriptArtifact {
@@ -3247,6 +3425,7 @@ impl TranscriptArtifact {
             transcript,
             authority: TranscriptAuthority::AmbientPath,
             diarization_audio_path: None,
+            source_transcript: None,
         }
     }
 }
@@ -3912,6 +4091,7 @@ mod authorized_process_input_tests {
             TranscriptAuthority::AuthorizedCapability(PrivateAudioAuthority(
                 input.processing_path().to_path_buf(),
             )),
+            Vec::new(),
         )
         .unwrap();
         assert!(artifact.is_descriptor_authorized());
@@ -4008,6 +4188,7 @@ mod authorized_process_input_tests {
             TranscriptAuthority::AuthorizedCapability(PrivateAudioAuthority(
                 input.processing_path().to_path_buf(),
             )),
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(no_speech.frontmatter.status, Some(OutputStatus::NoSpeech));
@@ -4638,30 +4819,30 @@ fn transcribe_to_artifact_with_authority(
     } else {
         None
     };
-    let calendar_event_title = matched_event.as_ref().map(|event| event.title.clone());
+    let calendar_event_title = matched_event
+        .as_ref()
+        .and_then(|event| meaningful_calendar_title(&event.title));
     let attendees = matched_event
         .as_ref()
         .map(|event| event.attendees.clone())
         .unwrap_or_default();
+    let vocabulary = load_vocabulary_for_decode_hints();
     let mut decode_hints = build_decode_hints(
         title,
         calendar_event_title.as_deref(),
         context.pre_context.as_deref(),
         &attendees,
         Some(&config.identity),
-        load_vocabulary_for_decode_hints().as_ref(),
+        vocabulary.as_ref(),
     );
     if let Some(format) = authorized_format {
         decode_hints = decode_hints.with_audio_format_extension(format);
     }
 
-    // Apply the same stem-mix workaround as `process_with_progress_and_sidecar`
-    // so background-job and `minutes process` callers (which reach the
-    // pipeline via `transcribe_to_artifact` and bypass the foreground
-    // entry point) are not exposed to the macOS 26 dual-track `.mov` 2x
-    // bug. A mixed temp handle cleans itself up; a single surviving stem is
-    // borrowed in place and contributes explicit recording health (#463).
-    let prepared_input = prepare_transcription_input_with_format(audio_path, authorized_format)?;
+    // Use the same native-source preparation as foreground processing. Meeting
+    // sources remain independent; other content retains the MOV decode workaround.
+    let prepared_input =
+        prepare_transcription_input_for_content(audio_path, authorized_format, content_type)?;
     if let Some(format_extension) = prepared_input.format_extension() {
         decode_hints = decode_hints.with_audio_format_extension(format_extension);
     }
@@ -4670,7 +4851,10 @@ fn transcribe_to_artifact_with_authority(
         .diarization_audio_path()
         .map(Path::to_path_buf);
     let step_start = std::time::Instant::now();
-    let result = transcribe_prepared_input_with_hints(
+    let PreparedTranscriptionResult {
+        transcription: result,
+        sources: source_transcript,
+    } = transcribe_prepared_input_with_hints(
         &prepared_input,
         audio_path,
         input_authority,
@@ -4680,6 +4864,7 @@ fn transcribe_to_artifact_with_authority(
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
+    let (result, spelling_corrections) = apply_vocabulary_spellings(result, vocabulary.as_ref());
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(&result.text, &attendees, &config.identity)
     } else {
@@ -4709,9 +4894,11 @@ fn transcribe_to_artifact_with_authority(
         } else {
             TranscriptAuthority::AmbientPath
         },
+        spelling_corrections,
     );
     let artifact = artifact.map(|mut artifact| {
         artifact.diarization_audio_path = diarization_audio_path;
+        artifact.source_transcript = source_transcript;
         artifact
     });
     match &artifact {
@@ -4752,6 +4939,7 @@ pub fn write_transcript_artifact(
         filter_stats,
         transcribe_ms,
         TranscriptAuthority::AmbientPath,
+        Vec::new(),
     )
 }
 
@@ -4767,6 +4955,7 @@ fn write_transcript_artifact_with_authority(
     filter_stats: crate::transcribe::FilterStats,
     transcribe_ms: u64,
     authority: TranscriptAuthority,
+    spelling_corrections: Vec<crate::vocabulary::SpellingCorrection>,
 ) -> Result<TranscriptArtifact, MinutesError> {
     match &authority {
         TranscriptAuthority::AmbientPath if is_reserved_private_audio_path(audio_path) => {
@@ -4797,7 +4986,9 @@ fn write_transcript_artifact_with_authority(
     } else {
         None
     };
-    let calendar_event_title = matched_event.as_ref().map(|event| event.title.clone());
+    let calendar_event_title = matched_event
+        .as_ref()
+        .and_then(|event| meaningful_calendar_title(&event.title));
     let attendees = matched_event
         .as_ref()
         .map(|event| event.attendees.clone())
@@ -4926,6 +5117,7 @@ fn write_transcript_artifact_with_authority(
         visibility: None,
         speaker_map: vec![],
         name_corrections: Vec::new(),
+        spelling_corrections,
         recording_health: context.recording_health.clone(),
         speaker_mapping: None,
         summarization: None,
@@ -4990,6 +5182,7 @@ fn write_transcript_artifact_with_authority(
         transcript,
         authority,
         diarization_audio_path: None,
+        source_transcript: None,
     })
 }
 
@@ -5183,7 +5376,10 @@ where
                         "last_segment_end": result.segments.last().map(|s| s.end),
                     }),
                 );
-                transcript = diarize::apply_speakers(&transcript, &result);
+                transcript = match &artifact.source_transcript {
+                    Some(sources) => sources.apply_speakers(&transcript, &result),
+                    None => diarize::apply_speakers(&transcript, &result),
+                };
                 log_rendered_label_collapse_diagnostic(diagnostic_audio_path, &result, &transcript);
             }
             diarize::DiarizationOutcome::Skipped { reason } => {
@@ -5422,6 +5618,12 @@ where
         effective_speaker_labels,
         artifact.frontmatter.attendees.len(),
         attendees.len(),
+    );
+    let summary = rerender_summary_if_withheld(
+        summary,
+        collapse_warning.as_ref(),
+        raw_summary.as_ref(),
+        summary_coverage.as_ref(),
     );
 
     let entities_started = std::time::Instant::now();
@@ -5741,13 +5943,14 @@ where
         .as_ref()
         .map(|e| e.attendees.clone())
         .unwrap_or_default();
+    let vocabulary = load_vocabulary_for_decode_hints();
     let mut decode_hints = build_decode_hints(
         title,
         calendar_event_title.as_deref(),
         pre_context.as_deref(),
         &calendar_attendees,
         Some(&config.identity),
-        load_vocabulary_for_decode_hints().as_ref(),
+        vocabulary.as_ref(),
     );
     if let Some(format_extension) = authorized_format {
         decode_hints = decode_hints.with_audio_format_extension(format_extension);
@@ -5755,13 +5958,10 @@ where
 
     // Step 1: Transcribe (always)
     on_progress(PipelineStage::Transcribing);
-    // Workaround: if this is a native-call .mov with stems beside it, transcribe
-    // a freshly-mixed PCM from both valid stems or the one surviving stem.
-    // `prepared_input` owns any temporary mix so Err/panic cleanup remains
-    // automatic; a surviving original stem is borrowed and never removed.
-    // If neither sibling contains signal, the typed mix error still prevents
-    // unsafe fallback to the broken dual-track `.mov` decoder.
-    let prepared_input = prepare_transcription_input_with_format(audio_path, authorized_format)?;
+    // Preserve separately captured meeting sources through final ASR. The
+    // original single-survivor recovery and typed MOV decode guard still apply.
+    let prepared_input =
+        prepare_transcription_input_for_content(audio_path, authorized_format, content_type)?;
     if let Some(format_extension) = prepared_input.format_extension() {
         decode_hints = decode_hints.with_audio_format_extension(format_extension);
     }
@@ -5771,7 +5971,10 @@ where
         .map(Path::to_path_buf);
     tracing::info!(step = "transcribe", file = %diagnostic_audio_path.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
-    let result = transcribe_prepared_input_with_hints(
+    let PreparedTranscriptionResult {
+        transcription: result,
+        sources: source_transcript,
+    } = transcribe_prepared_input_with_hints(
         &prepared_input,
         audio_path,
         input_authority,
@@ -5781,6 +5984,7 @@ where
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
+    let (result, spelling_corrections) = apply_vocabulary_spellings(result, vocabulary.as_ref());
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(
@@ -5872,7 +6076,10 @@ where
                 }
                 diarization_embeddings = result.speaker_embeddings.clone();
                 speaker_embedding_segments = result.speaker_embedding_segments.clone();
-                let transcript = diarize::apply_speakers(&transcript, &result);
+                let transcript = match &source_transcript {
+                    Some(sources) => sources.apply_speakers(&transcript, &result),
+                    None => diarize::apply_speakers(&transcript, &result),
+                };
                 log_rendered_label_collapse_diagnostic(diagnostic_audio_path, &result, &transcript);
                 transcript
             }
@@ -6134,6 +6341,12 @@ where
         calendar_attendees.len(),
         attendees.len(),
     );
+    let summary = rerender_summary_if_withheld(
+        summary,
+        collapse_warning.as_ref(),
+        raw_summary.as_ref(),
+        summary_coverage.as_ref(),
+    );
 
     // Step 5: Write markdown (always)
     let duration = format_duration_secs(filter_stats.audio_duration_secs);
@@ -6285,6 +6498,7 @@ where
         visibility: None,
         speaker_map,
         name_corrections,
+        spelling_corrections,
         recording_health,
         speaker_mapping: None,
         summarization: None,
@@ -6447,7 +6661,7 @@ fn format_duration_secs(duration_secs: f64) -> String {
 fn parse_transcript_line_start_secs(line: &str) -> Option<f32> {
     let rest = line.strip_prefix('[')?;
     let bracket_end = rest.find(']')?;
-    let timestamp = &rest[..bracket_end];
+    let timestamp = rest[..bracket_end].split_whitespace().last()?;
     let parts: Vec<&str> = timestamp.split(':').collect();
     let secs = match parts.as_slice() {
         [minutes, seconds] => minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?,
@@ -6563,6 +6777,26 @@ where
     let attempted_model = summarize::title_refinement_model(config);
     let input_chars = summarize::title_refinement_input_chars(summary_text, raw_summary, entities);
 
+    // The summary call already wrote a title with the whole transcript in
+    // view. Use it when it passes the same quality gate as a refined title;
+    // otherwise spend the separate title call as before.
+    if let Some(cleaned) = raw_summary
+        .title
+        .as_deref()
+        .map(sanitize_llm_title_candidate)
+        .filter(|cleaned| llm_title_passes_quality(cleaned))
+    {
+        return TitleGenerationDecision {
+            final_title: cleaned.clone(),
+            refined_title: Some(cleaned),
+            outcome: "llm",
+            model: attempted_model,
+            input_chars: 0,
+            detail: Some("from-summary".into()),
+            llm_duration_ms: 0,
+        };
+    }
+
     let llm_started = std::time::Instant::now();
     let refine_result = refine(summary_text, raw_summary, entities, config);
     let llm_duration_ms = llm_started.elapsed().as_millis() as u64;
@@ -6618,6 +6852,26 @@ where
 /// the single-pass `process` path and the desktop two-phase path
 /// (`write_transcript_artifact` → `enrich_transcript_artifact`) go through
 /// here so the toggle means the same thing everywhere.
+/// Calendars show a free/busy placeholder ("Busy") for an event whose details
+/// are hidden. It names no meeting: used as the title it became a project
+/// entity called "Busy" and a meaningless calendar label on the meeting.
+pub fn meaningful_calendar_title(title: &str) -> Option<String> {
+    const PLACEHOLDERS: &[&str] = &[
+        "busy",
+        "free",
+        "tentative",
+        "away",
+        "out of office",
+        "private",
+        "private event",
+        "private appointment",
+        "no title",
+        "(no title)",
+    ];
+    let title = normalize_space(title);
+    (!title.is_empty() && !PLACEHOLDERS.contains(&title.to_lowercase().as_str())).then_some(title)
+}
+
 fn calendar_meeting_title(config: &Config, calendar_event_title: Option<&str>) -> Option<String> {
     let event_title = calendar_event_title?;
     if config.calendar.use_event_title_for_meeting_title {
@@ -7232,6 +7486,35 @@ pub(crate) fn build_decode_hints(
     crate::transcribe::DecodeHints::from_candidates(&priority, &contextual)
 }
 
+/// Rewrite listed vocabulary misspellings ("Sok 2" for "SOC 2") in a fresh
+/// transcript, before speaker attribution, summary and title read it. The
+/// engines cannot all take hints (Parakeet v3 decodes greedily), so this is
+/// the one place a known wrong rendering is fixed. Exact, word-bounded and
+/// recorded in frontmatter; see [`crate::vocabulary::correct_spellings`].
+fn apply_vocabulary_spellings(
+    mut result: crate::transcribe::TranscribeResult,
+    vocabulary: Option<&crate::vocabulary::VocabularyStore>,
+) -> (
+    crate::transcribe::TranscribeResult,
+    Vec<crate::vocabulary::SpellingCorrection>,
+) {
+    let pairs = vocabulary
+        .map(crate::vocabulary::VocabularyStore::spelling_corrections)
+        .unwrap_or_default();
+    if pairs.is_empty() {
+        return (result, Vec::new());
+    }
+    let (text, applied) = crate::vocabulary::correct_spellings(&result.text, &pairs);
+    if applied.is_empty() {
+        return (result, applied);
+    }
+    result.text = text;
+    for segment in &mut result.segments {
+        segment.text = crate::vocabulary::correct_spellings(&segment.text, &pairs).0;
+    }
+    (result, applied)
+}
+
 fn load_vocabulary_for_decode_hints() -> Option<crate::vocabulary::VocabularyStore> {
     match crate::vocabulary::load() {
         Ok(store) if !store.entries.is_empty() => Some(store),
@@ -7793,6 +8076,36 @@ fn withhold_assignees_on_collapse(
     })
 }
 
+/// The Markdown body is rendered from the summarizer's own lines, so
+/// withholding owners in the structured data alone (#392) left "@Ryan:" in the
+/// text people actually read. When the guard fired, render the body again
+/// with the "@owner:" prefix dropped from action items and commitments.
+fn rerender_summary_if_withheld(
+    rendered: Option<String>,
+    collapse_warning: Option<&markdown::ProcessingWarning>,
+    raw_summary: Option<&summarize::Summary>,
+    coverage: Option<&summarize::SummaryCoverage>,
+) -> Option<String> {
+    match (collapse_warning, raw_summary) {
+        (Some(_), Some(raw)) => Some(format_summary_with_coverage(
+            &summary_without_owners(raw),
+            coverage,
+        )),
+        _ => rendered,
+    }
+}
+
+fn summary_without_owners(summary: &summarize::Summary) -> summarize::Summary {
+    let unowned = |line: &String| match parse_actor_prefix(line) {
+        (Some(_), what) => what,
+        (None, _) => line.clone(),
+    };
+    let mut summary = summary.clone();
+    summary.action_items = summary.action_items.iter().map(unowned).collect();
+    summary.commitments = summary.commitments.iter().map(unowned).collect();
+    summary
+}
+
 fn strip_conversational_prefixes(line: &str) -> String {
     let mut remaining = line.trim();
     let fillers = ["okay", "ok", "so", "well", "alright", "all right"];
@@ -7961,6 +8274,7 @@ pub(crate) fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown
     summary
         .action_items
         .iter()
+        .filter(|text| !crate::summary_semantics::is_absence_item("action_items", text))
         .map(|item| {
             let (assignee, task) = if let Some(rest) = item.strip_prefix('@') {
                 // "@user: Send pricing doc by Friday"
@@ -7981,7 +8295,7 @@ pub(crate) fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown
 
             markdown::ActionItem {
                 assignee,
-                task: task.trim_end_matches(')').trim().to_string(),
+                task: trim_unbalanced_close_parens(&task),
                 due,
                 status: "open".to_string(),
             }
@@ -7989,11 +8303,23 @@ pub(crate) fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown
         .collect()
 }
 
+/// Drop trailing ")" left over from an unbalanced suffix such as "(due Friday)"
+/// split mid-way, but keep a closing parenthesis that closes something:
+/// "(completed in-session)" must not become "(completed in-session".
+fn trim_unbalanced_close_parens(text: &str) -> String {
+    let mut text = text.trim();
+    while text.ends_with(')') && text.matches(')').count() > text.matches('(').count() {
+        text = text[..text.len() - 1].trim_end();
+    }
+    text.to_string()
+}
+
 /// Extract structured decisions from a Summary.
 pub(crate) fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::Decision> {
     summary
         .decisions
         .iter()
+        .filter(|text| !crate::summary_semantics::is_absence_item("decisions", text))
         .map(|text| {
             // Try to infer topic from the first few words
             let topic = infer_topic(text);
@@ -8044,6 +8370,9 @@ pub(crate) fn extract_intents(summary: &summarize::Summary) -> Vec<markdown::Int
     }
 
     for question in &summary.open_questions {
+        if crate::summary_semantics::is_absence_item("open_questions", question) {
+            continue;
+        }
         let (who, what) = parse_actor_prefix(question);
         intents.push(markdown::Intent {
             kind: markdown::IntentKind::OpenQuestion,
@@ -8055,11 +8384,14 @@ pub(crate) fn extract_intents(summary: &summarize::Summary) -> Vec<markdown::Int
     }
 
     for commitment in &summary.commitments {
+        if crate::summary_semantics::is_absence_item("commitments", commitment) {
+            continue;
+        }
         let due = extract_due_date(commitment);
         let (who, what) = parse_actor_prefix(commitment);
         intents.push(markdown::Intent {
             kind: markdown::IntentKind::Commitment,
-            what: what.trim_end_matches(')').trim().to_string(),
+            what: trim_unbalanced_close_parens(&what),
             who,
             status: "open".into(),
             by_date: due,
@@ -8103,41 +8435,48 @@ fn extract_due_date(text: &str) -> Option<String> {
     None
 }
 
-/// Infer a topic from decision text by extracting the first noun phrase.
+/// Infer a topic from decision text by extracting the first noun phrase:
+/// the words before the first verb or preposition. Decision topics become
+/// project entities, so when the sentence has no clear leading noun phrase
+/// (an imperative like "Keep the app name...", or a single word like
+/// "Gaming remains...") there is no topic. A fragment such as
+/// `keep app name "second` is worse than none.
 fn infer_topic(text: &str) -> Option<String> {
-    // Simple heuristic: use the first 3-5 meaningful words as the topic
-    let words: Vec<&str> = text
+    const LEADING_SKIP: &[&str] = &["the", "a", "an", "we", "they", "it", "our", "their"];
+    // Verbs and prepositions that end a leading noun phrase.
+    const BOUNDARIES: &[&str] = &[
+        "is", "are", "was", "were", "be", "been", "will", "would", "should", "must", "can",
+        "could", "may", "might", "shall", "has", "have", "had", "remains", "remain", "stays",
+        "stay", "keeps", "keep", "use", "uses", "needs", "need", "goes", "becomes", "gets",
+        "makes", "moves", "wins", "replaces", "rather", "instead", "to", "for", "of", "in", "on",
+        "at", "over", "with", "by", "from", "as", "via", "into", "only", "and", "or", "but",
+        "than",
+    ];
+    let mut words = text
         .split_whitespace()
-        .filter(|w| {
-            let lower = w.to_lowercase();
-            !matches!(
-                lower.as_str(),
-                "the"
-                    | "a"
-                    | "an"
-                    | "to"
-                    | "for"
-                    | "of"
-                    | "in"
-                    | "on"
-                    | "at"
-                    | "is"
-                    | "was"
-                    | "will"
-                    | "should"
-                    | "we"
-                    | "they"
-                    | "it"
-            )
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
         })
+        .filter(|word| !word.is_empty())
+        .skip_while(|word| LEADING_SKIP.contains(&word.as_str()))
+        .peekable();
+    // An imperative opening ("Keep...", "Use...") has no subject to name.
+    if words
+        .peek()
+        .is_some_and(|word| BOUNDARIES.contains(&word.as_str()))
+    {
+        return None;
+    }
+    let phrase: Vec<String> = words
+        .take_while(|word| !BOUNDARIES.contains(&word.as_str()))
         .take(4)
         .collect();
-
-    if words.is_empty() {
+    if phrase.len() < 2 {
         return None;
     }
 
-    let candidate = words.join(" ").to_lowercase();
+    let candidate = phrase.join(" ");
     (!is_task_like_project_candidate(&candidate, Some(text))).then_some(candidate)
 }
 
@@ -8172,6 +8511,9 @@ pub(crate) fn build_entity_links(
     }
 
     for decision in decisions {
+        if crate::summary_semantics::is_absence_item("decisions", &decision.text) {
+            continue;
+        }
         if let Some(topic) = &decision.topic {
             add_project_entity(&mut projects, topic, Some(&decision.text));
         } else {
@@ -8620,6 +8962,7 @@ mod tests {
             detail: "All source chunks delivered.".into(),
         };
         let summary = summarize::Summary {
+            title: None,
             text: String::new(),
             key_points: vec!["Meeting point".into()],
             decisions: vec![],
@@ -9321,6 +9664,7 @@ mod tests {
 
     fn sample_summary() -> summarize::Summary {
         summarize::Summary {
+            title: None,
             text: "Discussed Command RX codebase walkthrough and next steps.".into(),
             key_points: vec![
                 "Walked through the Command RX codebase".into(),
@@ -9369,6 +9713,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),
+            spelling_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
             summarization: None,
@@ -9437,6 +9782,47 @@ mod tests {
         let transcript = "Okay, this is a meeting that we're gonna be doing here";
         let title = generate_title(transcript, None);
         assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn summary_title_skips_the_separate_title_call() {
+        let mut summary = sample_summary();
+        summary.title = Some("Command RX Codebase Walkthrough".into());
+        let decision = maybe_refine_title_with_llm(
+            "Untitled Recording",
+            None,
+            Some("Command RX walkthrough with implementation planning."),
+            Some(&summary),
+            &markdown::EntityLinks::default(),
+            &Config::default(),
+            |_, _, _, _| panic!("title call must not run when the summary has a title"),
+        );
+        assert_eq!(decision.final_title, "Command RX Codebase Walkthrough");
+        assert_eq!(decision.outcome, "llm");
+        assert_eq!(decision.detail.as_deref(), Some("from-summary"));
+    }
+
+    #[test]
+    fn generic_summary_title_falls_back_to_the_title_call() {
+        let mut summary = sample_summary();
+        summary.title = Some("Meeting".into());
+        let decision = maybe_refine_title_with_llm(
+            "Untitled Recording",
+            None,
+            Some("Command RX walkthrough with implementation planning."),
+            Some(&summary),
+            &markdown::EntityLinks::default(),
+            &Config::default(),
+            |_, _, _, _| {
+                Ok(summarize::TitleRefinement {
+                    title: "Command RX Codebase Walkthrough".into(),
+                    model: "agent:claude".into(),
+                    input_chars: 128,
+                })
+            },
+        );
+        assert_eq!(decision.final_title, "Command RX Codebase Walkthrough");
+        assert_eq!(decision.detail, None);
     }
 
     #[test]
@@ -9731,6 +10117,7 @@ mod tests {
                 minutes_until: 0,
                 attendees: vec![],
                 url: None,
+                calendar: None,
             }),
             ..BackgroundPipelineContext::default()
         };
@@ -9893,6 +10280,7 @@ mod tests {
     #[test]
     fn extract_action_items_parses_assignee_and_task() {
         let summary = summarize::Summary {
+            title: None,
             text: String::new(),
             key_points: vec![],
             decisions: vec![],
@@ -10051,8 +10439,43 @@ mod tests {
     }
 
     #[test]
+    fn absence_placeholders_cannot_create_structured_intents_or_project_entities() {
+        let mut summary = sample_summary();
+        summary.decisions = vec![
+            "No decisions were made.".into(),
+            "Aucune décision spécifique n'a été prise.".into(),
+            "No changes to pricing.".into(),
+        ];
+        summary.action_items = vec!["None.".into()];
+        summary.open_questions = vec!["No open questions.".into()];
+        summary.commitments = vec!["No commitments were made.".into()];
+        let decisions = extract_decisions(&summary);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].text, "No changes to pricing.");
+        let intents = extract_intents(&summary);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].what, "No changes to pricing.");
+        let mut legacy = decisions;
+        legacy.push(markdown::Decision {
+            id: None,
+            effective_date: None,
+            text: summary.decisions[1].clone(),
+            topic: Some("Aucune décision spécifique n'a".into()),
+            authority: None,
+            supersedes: None,
+        });
+        let entities = build_entity_links("Recording", None, &[], &[], &legacy, &[], &[], None);
+        assert!(entities
+            .projects
+            .iter()
+            .all(|project| !project.label.contains("Aucune")
+                && !project.label.contains("No Decisions")));
+    }
+
+    #[test]
     fn extract_decisions_with_topic_inference() {
         let summary = summarize::Summary {
+            title: None,
             text: String::new(),
             key_points: vec![],
             decisions: vec![
@@ -10069,6 +10492,99 @@ mod tests {
         assert_eq!(decisions.len(), 2);
         assert!(decisions[0].topic.is_some());
         assert!(decisions[0].text.contains("monthly billing"));
+    }
+
+    #[test]
+    fn infer_topic_takes_the_leading_noun_phrase_or_nothing() {
+        assert_eq!(
+            infer_topic("LeaderNet 835 reconciliation remains the core workflow").as_deref(),
+            Some("leadernet 835 reconciliation")
+        );
+        assert_eq!(
+            infer_topic("Price advisor platform at monthly billing/mo").as_deref(),
+            Some("price advisor platform")
+        );
+        // The Second Look meeting: imperatives and one-word subjects used to
+        // become clipped project fragments.
+        assert_eq!(
+            infer_topic("Keep the app name \"Second Look\" rather than renaming"),
+            None
+        );
+        assert_eq!(
+            infer_topic("Use the pre-prepped judge Q&A file only as a fallback"),
+            None
+        );
+        assert_eq!(
+            infer_topic("Gaming remains the initial vertical, delivered as one plugin"),
+            None
+        );
+        assert_eq!(infer_topic("Pitch must explicitly cover uniqueness"), None);
+        // Punctuation never survives into a topic.
+        assert_eq!(
+            infer_topic("\"Second Look\" branding stays as is").as_deref(),
+            Some("second look branding")
+        );
+    }
+
+    #[test]
+    fn trim_unbalanced_close_parens_keeps_closed_parentheticals() {
+        assert_eq!(
+            trim_unbalanced_close_parens("present the integrations (completed in-session)"),
+            "present the integrations (completed in-session)"
+        );
+        assert_eq!(
+            trim_unbalanced_close_parens("Send doc by Friday)"),
+            "Send doc by Friday"
+        );
+        assert_eq!(trim_unbalanced_close_parens("plain task"), "plain task");
+    }
+
+    #[test]
+    fn withheld_owners_leave_the_rendered_body_too() {
+        let summary = summarize::Summary {
+            title: None,
+            text: String::new(),
+            key_points: vec!["point".into()],
+            decisions: vec![],
+            action_items: vec!["@Ryan: present the sponsor integrations".into()],
+            open_questions: vec![],
+            commitments: vec!["@Unnamed participant: will try Minutes".into()],
+            participants: vec![],
+        };
+        let warning = markdown::ProcessingWarning {
+            step: "attribution".into(),
+            reason: "diarization_collapsed".into(),
+            timeout_secs: None,
+            message: None,
+        };
+        let original = format_summary_with_coverage(&summary, None);
+        let body = rerender_summary_if_withheld(
+            Some(original.clone()),
+            Some(&warning),
+            Some(&summary),
+            None,
+        )
+        .unwrap();
+        assert!(!body.contains("@Ryan"));
+        assert!(!body.contains("@Unnamed"));
+        assert!(body.contains("- [ ] present the sponsor integrations"));
+        assert!(body.contains("- will try Minutes"));
+        // No collapse, no change.
+        assert_eq!(
+            rerender_summary_if_withheld(Some(original.clone()), None, Some(&summary), None),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn calendar_placeholders_are_not_meeting_titles() {
+        assert_eq!(meaningful_calendar_title("Busy"), None);
+        assert_eq!(meaningful_calendar_title("  out of office "), None);
+        assert_eq!(meaningful_calendar_title(""), None);
+        assert_eq!(
+            meaningful_calendar_title("Weekly sync  with Ryan").as_deref(),
+            Some("Weekly sync with Ryan")
+        );
     }
 
     #[test]
@@ -10861,6 +11377,7 @@ mod tests {
                     minutes_until: 45,
                     attendees: vec![],
                     url: None,
+                    calendar: None,
                 },
                 crate::calendar::CalendarEvent {
                     title: "Closest Event".into(),
@@ -10868,6 +11385,7 @@ mod tests {
                     minutes_until: 5,
                     attendees: vec![],
                     url: None,
+                    calendar: None,
                 },
             ],
             None,
@@ -10886,6 +11404,7 @@ mod tests {
                 minutes_until: 4,
                 attendees: vec!["mat@example.com".into()],
                 url: None,
+                calendar: None,
             }],
             Some("Wesley prep session recovery"),
         );
@@ -10902,6 +11421,7 @@ mod tests {
                 minutes_until: 2,
                 attendees: vec!["wesley@example.com".into()],
                 url: None,
+                calendar: None,
             }],
             Some("Wesley prep session recovery"),
         )
@@ -10951,6 +11471,7 @@ mod tests {
     #[test]
     fn extract_intents_builds_typed_entries() {
         let summary = summarize::Summary {
+            title: None,
             text: String::new(),
             key_points: vec![],
             decisions: vec!["Use REST over GraphQL for the new API".into()],
@@ -11493,6 +12014,49 @@ mod tests {
     }
 
     #[test]
+    fn listed_vocabulary_misspellings_are_fixed_before_anything_reads_the_transcript() {
+        let vocabulary = crate::vocabulary::VocabularyStore {
+            entries: vec![crate::vocabulary::VocabularyEntry {
+                kind: crate::vocabulary::VocabularyKind::Acronym,
+                canonical: "SOC 2".into(),
+                misspellings: vec!["Sok 2".into()],
+                ..crate::vocabulary::VocabularyEntry::default()
+            }],
+        }
+        .normalized()
+        .expect("normalize");
+        let result = crate::transcribe::TranscribeResult {
+            text: "[0:00] Our sok 2 audit.\n[0:04] Nothing else.\n".into(),
+            stats: Default::default(),
+            segments: vec![crate::transcribe::TranscriptSegment {
+                start: 0.0,
+                end: 4.0,
+                text: "Our sok 2 audit.".into(),
+            }],
+            detected_language: None,
+        };
+
+        let (fixed, applied) = apply_vocabulary_spellings(result.clone(), Some(&vocabulary));
+        assert_eq!(
+            fixed.text,
+            "[0:00] Our SOC 2 audit.\n[0:04] Nothing else.\n"
+        );
+        assert_eq!(fixed.segments[0].text, "Our SOC 2 audit.");
+        assert_eq!(
+            applied,
+            vec![crate::vocabulary::SpellingCorrection {
+                raw: "Sok 2".into(),
+                corrected: "SOC 2".into(),
+                count: 1,
+            }]
+        );
+
+        let (untouched, none) = apply_vocabulary_spellings(result.clone(), None);
+        assert_eq!(untouched.text, result.text);
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn build_decode_hints_uses_identity_aliases_attendees_and_context() {
         let identity = IdentityConfig {
             name: Some("Mat".into()),
@@ -11654,6 +12218,7 @@ mod tests {
                 minutes_until: 0,
                 attendees: vec!["Matt".into(), "Alex Chen".into()],
                 url: None,
+                calendar: None,
             }),
             ..BackgroundPipelineContext::default()
         };
@@ -11903,6 +12468,7 @@ mod tests {
                 source: diarize::AttributionSource::Llm,
             }],
             name_corrections: Vec::new(),
+            spelling_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
             summarization: None,
@@ -12708,6 +13274,304 @@ mod prepare_transcription_input_tests {
             registered_private_audio_reader(&mixed_capability).is_err(),
             "dropped mixed audio must not remain resolvable"
         );
+    }
+
+    #[test]
+    fn meeting_preparation_preserves_independent_stems_without_ffmpeg() {
+        let (_dir, mov) = fake_native_call_capture("source-separated");
+        let input =
+            prepare_transcription_input_for_content(&mov, None, ContentType::Meeting).unwrap();
+        let PreparedTranscriptionInput::IndependentStems(stems) = input else {
+            panic!("both native meeting stems must reach independent ASR");
+        };
+        let mut paths = Vec::new();
+        let result = transcribe_independent_stems(&stems, |path| {
+            paths.push(path.to_path_buf());
+            let text = if path == stems.voice {
+                "[0:00] quieter microphone words"
+            } else {
+                "[0:00] louder system words"
+            };
+            Ok(crate::transcribe::TranscribeResult {
+                text: text.into(),
+                stats: Default::default(),
+                segments: vec![],
+                detected_language: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(paths, vec![stems.voice, stems.system]);
+        assert!(result
+            .transcription
+            .text
+            .contains("quieter microphone words"));
+        assert!(result.transcription.text.contains("louder system words"));
+        assert!(result.sources.is_some());
+    }
+
+    #[test]
+    fn dual_source_wav_uses_independent_asr_but_single_and_authorized_wav_do_not_discover_stems() {
+        let (_dir, mov) = fake_native_call_capture("dual-source-wav");
+        let wav = mov.with_extension("wav");
+        write_audible_wav(&wav);
+        assert!(matches!(
+            prepare_transcription_input_for_content(&wav, None, ContentType::Meeting).unwrap(),
+            PreparedTranscriptionInput::IndependentStems(_)
+        ));
+        assert!(matches!(
+            prepare_transcription_input_for_content(&wav, Some("wav"), ContentType::Meeting)
+                .unwrap(),
+            PreparedTranscriptionInput::Original
+        ));
+        let single = wav.with_file_name("single.wav");
+        write_audible_wav(&single);
+        assert!(matches!(
+            prepare_transcription_input_for_content(&single, None, ContentType::Meeting).unwrap(),
+            PreparedTranscriptionInput::Original
+        ));
+    }
+
+    #[test]
+    fn meeting_wav_recovers_original_when_no_sibling_has_usable_audio() {
+        for (voice_state, system_state) in [
+            ("invalid", "invalid"),
+            ("silent", "silent"),
+            ("empty", "empty"),
+            ("invalid", "silent"),
+            ("silent", "invalid"),
+            ("silent", "missing"),
+            ("missing", "silent"),
+            ("invalid", "missing"),
+            ("missing", "invalid"),
+            ("empty", "missing"),
+            ("missing", "empty"),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let wav = dir.path().join("recover.wav");
+            write_audible_wav(&wav);
+            for (source, state) in [("voice", voice_state), ("system", system_state)] {
+                let path = dir.path().join(format!("recover.{source}.wav"));
+                match state {
+                    "invalid" => fs::write(path, b"corrupt header").unwrap(),
+                    "silent" => write_digital_silence_wav(&path),
+                    "empty" => fs::write(path, []).unwrap(),
+                    "missing" => {}
+                    _ => unreachable!(),
+                }
+            }
+            let original = fs::read(&wav).unwrap();
+            let voice_before = fs::read(dir.path().join("recover.voice.wav")).ok();
+            let system_before = fs::read(dir.path().join("recover.system.wav")).ok();
+            let input = prepare_transcription_input_for_content(&wav, None, ContentType::Meeting)
+                .unwrap_or_else(|error| {
+                    panic!("{voice_state}/{system_state} siblings must not block the good WAV: {error}")
+                });
+            assert_eq!(input.processing_path(&wav), wav);
+            let health = input
+                .recording_health()
+                .expect("recovery must be disclosed");
+            let warning = &health.capture_warnings[0];
+            assert_eq!(warning.source, crate::diarize::CaptureSource::Both);
+            assert!(warning.message.contains("mixed WAV"));
+            assert!(warning.message.contains("cannot be verified"));
+            assert_eq!(original, fs::read(&wav).unwrap());
+            for (source, before) in [("voice", voice_before), ("system", system_before)] {
+                let path = dir.path().join(format!("recover.{source}.wav"));
+                assert_eq!(
+                    before,
+                    fs::read(path).ok(),
+                    "unusable siblings must be preserved"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meeting_wav_recovery_does_not_hide_unusable_original_or_mov() {
+        for ext in ["wav", "mov"] {
+            for original_state in ["invalid", "silent"] {
+                let dir = tempfile::TempDir::new().unwrap();
+                let original = dir.path().join(format!("no-recovery.{ext}"));
+                if original_state == "silent" {
+                    write_digital_silence_wav(&original);
+                } else {
+                    fs::write(&original, b"invalid original container").unwrap();
+                }
+                for source in ["voice", "system"] {
+                    fs::write(
+                        dir.path().join(format!("no-recovery.{source}.wav")),
+                        b"invalid",
+                    )
+                    .unwrap();
+                }
+                assert!(
+                    prepare_transcription_input_for_content(&original, None, ContentType::Meeting)
+                        .is_err(),
+                    "{ext} must retain its explicit failure"
+                );
+                assert!(
+                    matches!(
+                        prepare_transcription_input_for_content(
+                            &original,
+                            Some(ext),
+                            ContentType::Meeting
+                        )
+                        .unwrap(),
+                        PreparedTranscriptionInput::Original
+                    ),
+                    "authorized input must not inspect siblings"
+                );
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join("audible.mov");
+        write_audible_wav(&mov);
+        for source in ["voice", "system"] {
+            fs::write(dir.path().join(format!("audible.{source}.wav")), b"invalid").unwrap();
+        }
+        assert!(
+            prepare_transcription_input_for_content(&mov, None, ContentType::Meeting).is_err(),
+            "MOV must never enter WAV recovery, even with decodable signal"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "whisper"))]
+    fn meeting_wav_recovery_warning_survives_foreground_and_background_processing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wav = dir.path().join("recover-pipelines.wav");
+        write_audible_wav(&wav);
+        for source in ["voice", "system"] {
+            fs::write(
+                dir.path().join(format!("recover-pipelines.{source}.wav")),
+                b"invalid",
+            )
+            .unwrap();
+        }
+        let mut config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        config.summarization.engine = "none".into();
+        config.diarization.engine = "none".into();
+        let foreground = process(
+            &wav,
+            ContentType::Meeting,
+            Some("Recovered meeting"),
+            &config,
+        )
+        .unwrap();
+        let content = fs::read_to_string(foreground.path).unwrap();
+        assert!(content.contains("mixed WAV"));
+        assert!(content.contains("cannot be verified"));
+        assert!(content.contains("status: degraded"), "{content}");
+        assert!(
+            content.contains("reason: source_tracks_unusable"),
+            "{content}"
+        );
+        assert!(!content.contains("[MICROPHONE]"));
+        assert!(!content.contains("[SYSTEM]"));
+        let background = transcribe_to_artifact(
+            &wav,
+            ContentType::Meeting,
+            Some("Background recovery"),
+            &config,
+            &BackgroundPipelineContext::default(),
+            None,
+        )
+        .unwrap();
+        assert!(background.source_transcript.is_none());
+        let enriched = enrich_transcript_artifact(
+            &wav,
+            &background,
+            &config,
+            &BackgroundPipelineContext::default(),
+            |_| {},
+        )
+        .unwrap();
+        let content = fs::read_to_string(enriched.path).unwrap();
+        assert!(content.contains("mixed WAV"));
+        assert!(content.contains("cannot be verified"));
+        assert!(content.contains("status: degraded"), "{content}");
+        assert!(
+            content.contains("reason: source_tracks_unusable"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn independent_source_decoder_failure_never_falls_back_to_a_mixed_success() {
+        let (_dir, mov) = fake_native_call_capture("source-failure");
+        let PreparedTranscriptionInput::IndependentStems(stems) =
+            prepare_transcription_input_for_content(&mov, None, ContentType::Meeting).unwrap()
+        else {
+            panic!("independent stems required");
+        };
+        let mut calls = 0;
+        let result = transcribe_independent_stems(&stems, |_| {
+            calls += 1;
+            Err(crate::error::TranscribeError::TranscriptionFailed(
+                "synthetic decoder failure".into(),
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        assert!(stems.voice.exists() && stems.system.exists());
+    }
+
+    #[test]
+    fn independent_source_without_speech_keeps_the_other_sources_text() {
+        let (_dir, mov) = fake_native_call_capture("source-noise");
+        let PreparedTranscriptionInput::IndependentStems(stems) =
+            prepare_transcription_input_for_content(&mov, None, ContentType::Meeting).unwrap()
+        else {
+            panic!("independent stems required");
+        };
+        let result = transcribe_independent_stems(&stems, |path| {
+            if path == stems.voice {
+                return Err(crate::error::TranscribeError::EmptyTranscript(0));
+            }
+            Ok(crate::transcribe::TranscribeResult {
+                text: "[0:00] actual system speech".into(),
+                stats: Default::default(),
+                segments: vec![],
+                detected_language: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            result.transcription.text,
+            "[SYSTEM 0:00] actual system speech\n"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "whisper"))]
+    fn foreground_and_background_meetings_keep_source_provenance() {
+        let (_dir, mov) = fake_native_call_capture("source-pipelines");
+        let mut config = Config {
+            output_dir: mov.parent().unwrap().join("meetings"),
+            ..Config::default()
+        };
+        config.summarization.engine = "none".into();
+        config.diarization.engine = "none".into();
+        let foreground =
+            process(&mov, ContentType::Meeting, Some("Source meeting"), &config).unwrap();
+        let content = fs::read_to_string(foreground.path).unwrap();
+        assert!(content.contains("[MICROPHONE]"));
+        assert!(content.contains("[SYSTEM]"));
+        let background = transcribe_to_artifact(
+            &mov,
+            ContentType::Meeting,
+            Some("Background source meeting"),
+            &config,
+            &BackgroundPipelineContext::default(),
+            None,
+        )
+        .unwrap();
+        assert!(background.transcript.contains("[MICROPHONE]"));
+        assert!(background.transcript.contains("[SYSTEM]"));
+        assert!(background.source_transcript.is_some());
     }
 
     #[test]

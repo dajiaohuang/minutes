@@ -8,10 +8,32 @@ use tauri::Emitter;
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
 const MAX_SESSIONS: usize = 1;
 
+/// A signed app's assistant must use that same app's CLI, including when the
+/// regular app and Minutes Dev are installed at different versions.
+fn bundled_cli_directory(executable: &std::path::Path) -> Option<PathBuf> {
+    let directory = executable.parent()?;
+    if directory.file_name()? != "MacOS"
+        || directory.parent()?.file_name()? != "Contents"
+        || !directory.join("minutes").is_file()
+    {
+        return None;
+    }
+    Some(directory.to_path_buf())
+}
+
 /// Environment overrides shared by the interactive assistant PTY and any
 /// bounded probe that must describe that exact session. GUI apps on macOS get
 /// a stripped PATH, so probing with the ambient process environment can report
 /// "not authenticated" even while the PTY can launch the same agent normally.
+/// Session-identity variables a parent Claude Code process sets for its own
+/// children. They describe that parent, never the assistant Minutes starts.
+const INHERITED_SESSION_MARKERS: [&str; 4] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SSE_PORT",
+];
+
 pub fn assistant_process_environment() -> Vec<(String, String)> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mut path_dirs: Vec<String> = vec![
@@ -40,6 +62,12 @@ pub fn assistant_process_environment() -> Vec<(String, String)> {
     if npm_global.exists() {
         path_dirs.insert(0, npm_global.display().to_string());
     }
+    if let Some(directory) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| bundled_cli_directory(&executable))
+    {
+        path_dirs.insert(0, directory.display().to_string());
+    }
 
     vec![
         ("PATH".into(), path_dirs.join(":")),
@@ -48,6 +76,26 @@ pub fn assistant_process_environment() -> Vec<(String, String)> {
         ("COLORTERM".into(), "truecolor".into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ]
+}
+
+#[cfg(test)]
+mod bundled_cli_tests {
+    use super::*;
+
+    #[test]
+    fn app_assistant_resolves_its_own_cli_without_changing_the_global_link() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("Minutes Dev.app/Contents/MacOS");
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("minutes-app");
+        assert_eq!(bundled_cli_directory(&executable), None);
+        std::fs::write(directory.join("minutes"), b"fixture").unwrap();
+        assert_eq!(bundled_cli_directory(&executable), Some(directory));
+        assert_eq!(
+            bundled_cli_directory(&root.path().join("target/debug/minutes-app")),
+            None
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -72,6 +120,9 @@ pub struct PtySession {
     pub context_dir: PathBuf,
     pub title: String,
     pub command: String,
+    /// The `COLORFGBG` theme the child started with; terminal apps choose
+    /// their colours once, at startup.
+    pub theme_dark: Option<bool>,
 }
 
 pub struct SpawnConfig {
@@ -107,6 +158,12 @@ impl PtyManager {
         self.sessions
             .get(session_id)
             .map(|session| session.title.clone())
+    }
+
+    pub fn session_theme_dark(&self, session_id: &str) -> Option<bool> {
+        self.sessions
+            .get(session_id)
+            .and_then(|session| session.theme_dark)
     }
 
     pub fn session_command(&self, session_id: &str) -> Option<String> {
@@ -163,6 +220,13 @@ impl PtyManager {
 
         for (name, value) in assistant_process_environment() {
             cmd.env(name, value);
+        }
+        // Minutes launched from inside a Claude Code session (an agent running
+        // the dev installer, or `open` from its shell) inherits that session's
+        // markers, and the assistant started here then believes it is a child
+        // session and turns off transcript saving. It is a fresh session.
+        for name in INHERITED_SESSION_MARKERS {
+            cmd.env_remove(name);
         }
         // Identify the host the way real terminals do. Codex's terminal
         // detection keys on TERM_PROGRAM (Ghostty, iTerm, Warp, kitty, ...)
@@ -251,6 +315,7 @@ impl PtyManager {
                 context_dir: context_dir_for_insert,
                 title: cfg.title,
                 command: cfg.command,
+                theme_dark: cfg.theme_dark,
             },
         );
 

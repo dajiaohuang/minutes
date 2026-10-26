@@ -45,7 +45,7 @@ const pages = [
     title: "Minutes vs Fathom",
     href: "/compare/fathom-vs-minutes",
     blurb:
-      "Best if you are weighing the strongest free cloud notetaker against an on-device memory layer where nothing is ever uploaded.",
+      "Best if you are weighing the strongest free cloud notetaker against local meeting capture and memory, with cloud AI available when you choose it.",
   },
   {
     title: "Minutes vs MacWhisper",
@@ -57,7 +57,7 @@ const pages = [
     title: "Minutes vs Krisp",
     href: "/compare/krisp-vs-minutes",
     blurb:
-      "Best if you are deciding between on-device noise cancellation with cloud notes added on, and a fully on-device conversation record.",
+      "Best if you are deciding between on-device noise cancellation with cloud notes added on, and a local conversation record with optional cloud AI.",
   },
 ] as const;
 

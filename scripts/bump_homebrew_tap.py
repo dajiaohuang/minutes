@@ -46,7 +46,7 @@ TAP_BRANCH = "main"
 SOURCE_REPO = "silverstein/minutes"
 CASK_PATH = "Casks/minutes.rb"
 FORMULA_PATH = "Formula/minutes.rb"
-SHERPA_ASSET = "minutes-macos-arm64-sherpa.tar.gz"
+SHERPA_ASSET = "minutes-macos-arm64-sherpa-shared.tar.gz"
 API = "https://api.github.com"
 
 
@@ -130,12 +130,25 @@ def bump_formula(content: str, version: str, sherpa_sha256: str | None) -> str:
     if sherpa_sha256 is None:
         return content
 
+    # Upgrade the install recipe with the resource pin. Historical two-file
+    # archives remain valid, but a partial shared-library pair is an error.
+    legacy_install = '        bin.install "libminutes_sherpa.dylib"'
+    shared_install = '''        libraries = %w[libsherpa-onnx-c-api.dylib libonnxruntime.dylib]
+        present = libraries.select { |library| File.file?(library) }
+        odie "Incomplete Minutes sherpa runtime" if present.any? && present.length != libraries.length
+        bin.install(*present) unless present.empty?
+        bin.install "libminutes_sherpa.dylib"'''
+    if 'odie "Incomplete Minutes sherpa runtime"' not in content:
+        if content.count(legacy_install) != 1:
+            raise BumpError("could not locate the reviewed sherpa install recipe")
+        content = content.replace(legacy_install, shared_install)
+
     # The staged plugin is pinned by URL and hash. Moving only the git tag
     # would build a new CLI and hand it the previous release's plugin, which
     # is a version skew the ABI check would reject at load time.
     content = substitute_once(
-        rf'(releases/download/)v[^/]+(/{re.escape(SHERPA_ASSET)})',
-        lambda m: f"{m.group(1)}v{version}{m.group(2)}",
+        r'(releases/download/)v[^/]+/minutes-macos-arm64-sherpa(?:-shared)?\.tar\.gz',
+        lambda m: f"{m.group(1)}v{version}/{SHERPA_ASSET}",
         content,
         "sherpa resource url",
     )
@@ -159,7 +172,7 @@ def formula_sherpa_sha256(content: str) -> str | None:
 
 def formula_sherpa_version(content: str) -> str | None:
     match = re.search(
-        rf'releases/download/v([^/]+)/{re.escape(SHERPA_ASSET)}', content
+        r'releases/download/v([^/]+)/minutes-macos-arm64-sherpa(?:-shared)?\.tar\.gz', content
     )
     return match.group(1) if match else None
 
@@ -543,6 +556,12 @@ FIXTURE_FORMULA = """class Minutes < Formula
       end
     end
   end
+
+  def install
+    resource("sherpa-plugin").stage do
+        bin.install "libminutes_sherpa.dylib"
+    end
+  end
 end
 """
 
@@ -582,6 +601,16 @@ def self_test() -> int:
         formula_sherpa_version(bumped) == "0.25.0"
         and formula_sherpa_sha256(bumped) == sherpa_sha,
         "formula bump moves the staged sherpa plugin url and hash",
+    )
+    check(
+        f"/{SHERPA_ASSET}" in bumped
+        and 'libraries = %w[libsherpa-onnx-c-api.dylib libonnxruntime.dylib]' in bumped
+        and 'bin.install(*present)' in bumped,
+        "formula migration installs both shared libraries with the new archive pin",
+    )
+    check(
+        bump_formula(bumped, "0.25.0", sherpa_sha) == bumped,
+        "shared formula migration is idempotent",
     )
     check(
         formula_sherpa_version(bump_formula(FIXTURE_FORMULA, "0.25.0", None)) == "0.24.0",

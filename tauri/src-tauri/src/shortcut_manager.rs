@@ -624,6 +624,12 @@ pub fn persisted_shortcut_for_slot(
                 let kc = config.dictation.hotkey_keycode;
                 let label = if kc == 63 { "fn" } else { "CapsLock" };
                 (label.to_string(), kc, "native")
+            } else if let Some((label, kc)) = native_key_for_name(&config.dictation.shortcut) {
+                // Turning a native shortcut off clears `hotkey_enabled` but
+                // leaves its name in `shortcut`. Reporting that name with the
+                // standard backend made the next "On" try to register "fn" as
+                // a chord, which the global-shortcut parser rejects.
+                (label.to_string(), kc, "native")
             } else if !config.dictation.shortcut.is_empty() {
                 (config.dictation.shortcut.clone(), -1, "standard")
             } else {
@@ -637,6 +643,15 @@ pub fn persisted_shortcut_for_slot(
                 (default_shortcut_for_slot(slot).to_string(), -1, "standard")
             }
         }
+    }
+}
+
+/// The native key a saved shortcut name refers to, as (label, macOS keycode).
+fn native_key_for_name(name: &str) -> Option<(&'static str, i64)> {
+    match name.trim().to_ascii_lowercase().replace(' ', "").as_str() {
+        "fn" => Some(("fn", 63)),
+        "capslock" => Some(("CapsLock", 57)),
+        _ => None,
     }
 }
 
@@ -1105,6 +1120,34 @@ mod tests {
         assert_eq!(shortcut, "fn");
         assert_eq!(keycode, 63);
         assert_eq!(backend, "native");
+    }
+
+    #[test]
+    fn a_turned_off_native_shortcut_comes_back_native() {
+        // Mat's config after switching fn off: the flag is cleared but the
+        // name stays. Switching it back on must not register "fn" as a chord.
+        let mut config = minutes_core::Config::default();
+        config.dictation.hotkey_enabled = false;
+        config.dictation.shortcut_enabled = false;
+        config.dictation.shortcut = "fn".into();
+        config.dictation.hotkey_keycode = 63;
+        assert_eq!(
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation),
+            ("fn".to_string(), 63, "native")
+        );
+        assert_eq!(classify_shortcut(63), ShortcutBackend::Native);
+
+        config.dictation.shortcut = "Caps Lock".into();
+        assert_eq!(
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation),
+            ("CapsLock".to_string(), 57, "native")
+        );
+
+        config.dictation.shortcut = "CmdOrCtrl+Shift+Space".into();
+        assert_eq!(
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation),
+            ("CmdOrCtrl+Shift+Space".to_string(), -1, "standard")
+        );
     }
 
     #[test]

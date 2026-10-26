@@ -381,6 +381,7 @@ fn write_artifact(
         visibility: None,
         speaker_map: vec![],
         name_corrections: Vec::new(),
+        spelling_corrections: Vec::new(),
         recording_health: None,
         speaker_mapping: None,
         summarization: None,

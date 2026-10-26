@@ -66,12 +66,12 @@ before any other on-disk location. Substitute your own install directory if it
 is not `~/.local/bin` (a `cargo install` layout puts the binary in
 `~/.cargo/bin`).
 
-Installing differs by platform, because only macOS links sherpa-onnx
-statically into the plugin:
+The plugin loads sherpa-onnx and its own ONNX Runtime as shared libraries from
+its directory, so install them together:
 
 ```bash
-# macOS: the plugin is self-contained.
-cp crates/sherpa-plugin/target/release/libminutes_sherpa.dylib ~/.local/bin/
+# macOS: the plugin finds its libraries through an @loader_path runpath.
+cp crates/sherpa-plugin/target/release/{libminutes_sherpa,libsherpa-onnx-c-api,libonnxruntime}.dylib ~/.local/bin/
 
 # Linux: the sherpa libraries must travel with it, since the plugin resolves
 # them through its own $ORIGIN. Copying the plugin alone installs one that
@@ -95,8 +95,8 @@ minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sher
 > arbitrating it. A Rust cdylib exports only its own `#[no_mangle]` surface, so
 > the embedded runtime stays internal and macOS two-level namespaces bind each
 > image's calls to its own copy. Verified on arm64: one binary enrolls a voice
-> through ORT 1.22 and transcribes through the plugin's ORT 1.17, in one
-> process.
+> through ORT 1.22 and transcribes through the plugin's own ORT (1.17 when
+> first verified, 1.28 since the move to shared libraries), in one process.
 >
 > The plugin is found via `MINUTES_SHERPA_PLUGIN`, then beside the running
 > executable, then in `<transcription.model_path>/sherpa/lib/`, which with the
@@ -110,8 +110,14 @@ minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sher
 > it, and `minutes health` then reports it as not installed. Reported by
 > @ReticentEclectic in #998.
 
-> **Platform note.** On macOS, the plugin links sherpa-onnx statically, so it is
-> self-contained and the copy above is all you need.
+> **Platform note.** On macOS the plugin links sherpa-onnx 1.13.x as shared
+> libraries (`libsherpa-onnx-c-api.dylib`, `libonnxruntime.dylib`, ONNX Runtime
+> 1.28). `crates/sherpa-plugin/build.rs` downloads the pinned universal2 archive,
+> checks its SHA-256, and generates the bindings from its headers; set
+> `MINUTES_SHERPA_ARCHIVE` to a local copy for offline builds. The plugin carries
+> an `@loader_path` runpath, so copy all three dylibs together. The previous
+> static build bundled ONNX Runtime 1.17.1, which loaded the Parakeet int8 model
+> in about 6 s and decoded it about three times slower than 1.13.x.
 >
 > On Linux, sherpa-rs links dynamic libraries (`libsherpa-onnx-c-api.so`,
 > `libonnxruntime.so`) that are built into the plugin crate's `target/release`.
@@ -131,15 +137,18 @@ minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sher
 > rather than the DLL's own directory, so the same trick does not apply there
 > and it needs its own packaging. That is tracked in #645.
 
-On Apple Silicon builds with `engine-sherpa` and a plugin present, plain
-`minutes setup` downloads the four model files plus Whisper tiny for live and
-dictation fallback. Without the plugin it installs Whisper small and explains
-which packaged install includes Parakeet; setup does not download the plugin.
-`minutes setup --sherpa` downloads the four model files (with a size-floor
-integrity check) and writes `transcription.engine = "sherpa"` to your config, so
-no manual edit is needed. If the binary lacks the `engine-sherpa` feature, setup
-still configures the engine and prints a note that transcription falls back to
-Whisper until you rebuild with the feature.
+On Apple Silicon builds with `engine-sherpa`, a plugin present and the Auto
+engine selected, plain `minutes setup` downloads the four Parakeet model files
+and the configured Whisper meeting model (Small by default). It also installs
+the configured Live/dictation models (Base by default) without changing those
+selections. Without the plugin it keeps the configured Whisper model and
+explains which packaged install includes Parakeet; setup does not download the
+plugin. Tiny is never selected as an automatic fallback.
+
+`minutes setup --sherpa` explicitly selects the sherpa engine after installation.
+A binary without the `engine-sherpa` feature refuses that request before
+downloading or changing configuration. To install a Whisper companion without
+selecting it for meetings, use `minutes setup --model base --download-only`.
 
 Run `minutes setup --list` to see all engines and recommended models.
 
@@ -343,3 +352,19 @@ The current engine code sets `model_type = ""` so sherpa auto-detects the NeMo
 Parakeet-TDT loader. If a future `sherpa-rs` change or local patch forces the
 generic `"transducer"` model type, model loading can fail with a metadata error
 like this. Keep `model_type` empty for this model family.
+
+### macOS archive compatibility
+
+New MCP clients first request `minutes-macos-arm64-sherpa-shared.tar.gz`, which
+contains the CLI, the plugin, and both private shared libraries. On an older
+release that lacks this asset, they accept the original two-file static archive;
+only an unavailable asset permits fallback, never a checksum or extraction error.
+A single shared library without its companion is rejected.
+
+Releases also retain `minutes-macos-arm64-sherpa.tar.gz` with the current CLI and
+a plugin built using `--features legacy-static` in a separate target directory.
+Already-published MCP clients strictly accept only this two-file layout. Do not
+add shared libraries to that asset or remove it during the migration. Both
+plugins expose the same Minutes ABI. Desktop bundles use the default shared
+build; the Homebrew bump migrates the formula resource and install recipe to
+carry both libraries with the plugin.

@@ -1,4 +1,19 @@
 fn main() {
+    // clap's large derive parser needs more stack in unoptimized builds. The
+    // parser unit tests already use 16 MiB threads; real debug CLI subprocesses
+    // need the same allowance on Windows (#1180). Reserve virtual address space
+    // on this executable only, without increasing the committed stack, moving
+    // startup onto a thread, or changing optimized releases and worker binaries.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("OPT_LEVEL").as_deref() == Ok("0")
+    {
+        match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+            Ok("msvc") => println!("cargo:rustc-link-arg-bin=minutes=/STACK:16777216"),
+            Ok("gnu") => println!("cargo:rustc-link-arg-bin=minutes=-Wl,--stack,16777216"),
+            _ => {}
+        }
+    }
+
     for name in ["minutes-graph-worker", "minutes-apple-speech-worker"] {
         println!("cargo:rerun-if-changed=assets/{name}-Info.plist");
     }

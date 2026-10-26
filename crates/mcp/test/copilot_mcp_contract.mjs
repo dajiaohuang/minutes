@@ -121,7 +121,7 @@ try {
     const message = started.content?.map((entry) => entry.text ?? "").join(" ") ?? "";
     assert(
       /qmd cleanup|agent trust boundary/i.test(message),
-      "a blocked start_copilot must explain the local trust-boundary remediation"
+      `a blocked start_copilot must explain the local trust-boundary remediation; received: ${JSON.stringify(message)}`
     );
     console.log(
       "NOTE: QMD retirement is not attested in this environment — verified fail-closed start; engine-active and guided-setup paths skipped"

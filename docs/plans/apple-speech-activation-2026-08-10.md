@@ -15,6 +15,8 @@ Mat delegated the four Phase 0 calls. They are recorded here as decided, not ope
 
 Flipping any user-facing default still requires Mat's explicit word at the moment it happens; these decisions set direction, not a standing authorization to activate.
 
+**2026-10-24 update (Mat's call):** open standalone live transcript as an opt-in now, ahead of Phases 2 and 3, with shadow logging available alongside. Whisper stays the default; dictation and batch stay closed. Evidence at the time: on a MacBook running macOS 26.6, the signed v0.30.10 app passed both the transport and the `--runtime` acceptance routes (real Rust-linked worker, 28 words from the public fixture, first result at 109 ms, no held audio files). That closes the Phase 6 C-driver confound. Phase 1's per-session fallback carries machines without assets or runtime support.
+
 ## Non-goals
 
 Parakeet activation stays out of scope; it remains dormant behind its own gate. Whisper stays the default engine; this epic does not change that. Nothing here targets non-macOS or pre-26 macOS.

@@ -1,0 +1,814 @@
+{
+  "task": "oracle-word-attribution",
+  "qualification": "Descriptive follow-up frozen after model DER predictions but before word scoring. Oracle text and timing isolate attribution; not end-to-end ASR WER, production word alignment, a new promotion gate or a named-identity test.",
+  "policy_sha256": "3b3b1dd3fa3be9793fe0ec924d1033e236adb8b75f7faff4a656e06f1903b7fc",
+  "manifest_sha256": "4210c2d98b79493f21efefcc02c161bb6409308c8832e7017110e63d57744337",
+  "runner_sha256": "468b3ee1d57289a259b7b95e1d60c120cd45be5523f33c1155ab0d8db66350dc",
+  "model_report_sha256": "17111abfd23a5cd3dc93b88f5851b036c87690f03e6b183b39e3fea8f645b835",
+  "prediction_sha256": {
+    "IS1008a-baseline.stdout": "60443159b217727819685a8cdf0f58f859632ee38ddb637b4388b9451d9aa064",
+    "IS1008a-candidate.stdout": "e01baa461fd1c9a9c2e793d2a3a0753fa710a714edcb6f8c6fa6a2c01a9d7863",
+    "TS3004a-baseline.stdout": "6775efad2b0e8a90d9fbfc06b74d1ae8fde0cfea1d2df593988a7f1be161fe3a",
+    "TS3004a-candidate.stdout": "7fef660d44438e44543e2b125715cce10d9099514f7dd4b1c3fb92af8ac85c09",
+    "IB4001-baseline.stdout": "4164c1060973d84806ad42aa42c0674912d359a5e27f40b067074fd1b354c975",
+    "IB4001-candidate.stdout": "a68376fa0ac22d565f0d08cb9db88a1a5bd51b8357801d58b8a171feb1d1c1f3"
+  },
+  "meeteval_version": "0.4.3",
+  "rows": [
+    {
+      "id": "IS1008a",
+      "engine": "baseline",
+      "reference_words": 2529,
+      "attributed_words": 2228,
+      "abstentions": {
+        "no_activity": 5,
+        "unknown_activity": 210,
+        "multiple_speakers": 86
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 243
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 43
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 46
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 54
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.16449189402926057,
+        "errors": 416,
+        "length": 2529,
+        "insertions": 49,
+        "deletions": 350,
+        "substitutions": 17,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0029399791939933337,
+          "overlap_time": 10.399999999999778,
+          "total_time": 3537.44
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.002147402029034132,
+          "overlap_time": 9.469999999999942,
+          "total_time": 4409.9800000000005
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 4,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "C",
+            "SPEAKER_5"
+          ],
+          [
+            "A",
+            "SPEAKER_1"
+          ],
+          [
+            "B",
+            "SPEAKER_2"
+          ],
+          [
+            "D",
+            "SPEAKER_3"
+          ],
+          [
+            null,
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_8"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.17042309213127718,
+        "errors": 431,
+        "length": 2529,
+        "insertions": 63,
+        "deletions": 364,
+        "substitutions": 4,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0029399791939933337,
+          "overlap_time": 10.399999999999778,
+          "total_time": 3537.44
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.002147402029034132,
+          "overlap_time": 9.469999999999942,
+          "total_time": 4409.9800000000005
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 4,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "C",
+            "SPEAKER_5"
+          ],
+          [
+            "A",
+            "SPEAKER_1"
+          ],
+          [
+            "B",
+            "SPEAKER_2"
+          ],
+          [
+            "D",
+            "SPEAKER_3"
+          ],
+          [
+            null,
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_8"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "IS1008a",
+      "engine": "candidate",
+      "reference_words": 2529,
+      "attributed_words": 2284,
+      "abstentions": {
+        "no_activity": 5,
+        "multiple_speakers": 240
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 243
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 43
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 46
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 54
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.1221826809015421,
+        "errors": 309,
+        "length": 2529,
+        "insertions": 29,
+        "deletions": 274,
+        "substitutions": 6,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0029399791939933337,
+          "overlap_time": 10.399999999999778,
+          "total_time": 3537.44
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0026764333004648307,
+          "overlap_time": 8.929999999999922,
+          "total_time": 3336.53
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "C",
+            "SPEAKER_03"
+          ],
+          [
+            "A",
+            "SPEAKER_00"
+          ],
+          [
+            "B",
+            "SPEAKER_01"
+          ],
+          [
+            "D",
+            "SPEAKER_02"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.12257809410834322,
+        "errors": 310,
+        "length": 2529,
+        "insertions": 30,
+        "deletions": 275,
+        "substitutions": 5,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0029399791939933337,
+          "overlap_time": 10.399999999999778,
+          "total_time": 3537.44
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0026764333004648307,
+          "overlap_time": 8.929999999999922,
+          "total_time": 3336.53
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "C",
+            "SPEAKER_03"
+          ],
+          [
+            "A",
+            "SPEAKER_00"
+          ],
+          [
+            "B",
+            "SPEAKER_01"
+          ],
+          [
+            "D",
+            "SPEAKER_02"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "TS3004a",
+      "engine": "baseline",
+      "reference_words": 3067,
+      "attributed_words": 2101,
+      "abstentions": {
+        "no_activity": 44,
+        "unknown_activity": 703,
+        "multiple_speakers": 219
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 273
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 118
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 73
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 130
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.39191392239973916,
+        "errors": 1202,
+        "length": 3067,
+        "insertions": 76,
+        "deletions": 1042,
+        "substitutions": 84,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0021332675970872276,
+          "overlap_time": 11.249999999999204,
+          "total_time": 5273.6
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.002546606426387695,
+          "overlap_time": 21.649999999999253,
+          "total_time": 8501.51
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 10,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_8"
+          ],
+          [
+            "A",
+            "SPEAKER_1"
+          ],
+          [
+            "C",
+            "SPEAKER_3"
+          ],
+          [
+            "D",
+            "SPEAKER_2"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_10"
+          ],
+          [
+            null,
+            "SPEAKER_12"
+          ],
+          [
+            null,
+            "SPEAKER_11"
+          ],
+          [
+            null,
+            "SPEAKER_14"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_13"
+          ],
+          [
+            null,
+            "SPEAKER_9"
+          ],
+          [
+            null,
+            "SPEAKER_5"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.41571568307792633,
+        "errors": 1275,
+        "length": 3067,
+        "insertions": 147,
+        "deletions": 1113,
+        "substitutions": 15,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0021332675970872276,
+          "overlap_time": 11.249999999999204,
+          "total_time": 5273.6
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.002546606426387695,
+          "overlap_time": 21.649999999999253,
+          "total_time": 8501.51
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 10,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_8"
+          ],
+          [
+            "A",
+            "SPEAKER_1"
+          ],
+          [
+            "C",
+            "SPEAKER_3"
+          ],
+          [
+            "D",
+            "SPEAKER_2"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_10"
+          ],
+          [
+            null,
+            "SPEAKER_12"
+          ],
+          [
+            null,
+            "SPEAKER_11"
+          ],
+          [
+            null,
+            "SPEAKER_14"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_13"
+          ],
+          [
+            null,
+            "SPEAKER_9"
+          ],
+          [
+            null,
+            "SPEAKER_5"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "TS3004a",
+      "engine": "candidate",
+      "reference_words": 3067,
+      "attributed_words": 2256,
+      "abstentions": {
+        "no_activity": 41,
+        "multiple_speakers": 770
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 273
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 118
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 73
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 130
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.3218128464297359,
+        "errors": 987,
+        "length": 3067,
+        "insertions": 49,
+        "deletions": 860,
+        "substitutions": 78,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0021332675970872276,
+          "overlap_time": 11.249999999999204,
+          "total_time": 5273.6
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0035535268313764785,
+          "overlap_time": 18.16999999999915,
+          "total_time": 5113.23
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_03"
+          ],
+          [
+            "A",
+            "SPEAKER_01"
+          ],
+          [
+            "C",
+            "SPEAKER_02"
+          ],
+          [
+            "D",
+            "SPEAKER_00"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.3413759373981089,
+        "errors": 1047,
+        "length": 3067,
+        "insertions": 109,
+        "deletions": 920,
+        "substitutions": 18,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0021332675970872276,
+          "overlap_time": 11.249999999999204,
+          "total_time": 5273.6
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0035535268313764785,
+          "overlap_time": 18.16999999999915,
+          "total_time": 5113.23
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_03"
+          ],
+          [
+            "A",
+            "SPEAKER_01"
+          ],
+          [
+            "C",
+            "SPEAKER_02"
+          ],
+          [
+            "D",
+            "SPEAKER_00"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "IB4001",
+      "engine": "baseline",
+      "reference_words": 4690,
+      "attributed_words": 3100,
+      "abstentions": {
+        "unknown_activity": 1337,
+        "multiple_speakers": 240,
+        "no_activity": 13
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 309
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 376
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 122
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 102
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.3929637526652452,
+        "errors": 1843,
+        "length": 4690,
+        "insertions": 80,
+        "deletions": 1670,
+        "substitutions": 93,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0024833046177504814,
+          "overlap_time": 17.439999999999856,
+          "total_time": 7022.9
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0020032928233581575,
+          "overlap_time": 25.260000000000616,
+          "total_time": 12609.24
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 5,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_1"
+          ],
+          [
+            "C",
+            "SPEAKER_5"
+          ],
+          [
+            "A",
+            "SPEAKER_3"
+          ],
+          [
+            "D",
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_8"
+          ],
+          [
+            null,
+            "SPEAKER_2"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_9"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.4093816631130064,
+        "errors": 1920,
+        "length": 4690,
+        "insertions": 147,
+        "deletions": 1737,
+        "substitutions": 36,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0024833046177504814,
+          "overlap_time": 17.439999999999856,
+          "total_time": 7022.9
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0020032928233581575,
+          "overlap_time": 25.260000000000616,
+          "total_time": 12609.24
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 5,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_1"
+          ],
+          [
+            "C",
+            "SPEAKER_5"
+          ],
+          [
+            "A",
+            "SPEAKER_3"
+          ],
+          [
+            "D",
+            "SPEAKER_4"
+          ],
+          [
+            null,
+            "SPEAKER_8"
+          ],
+          [
+            null,
+            "SPEAKER_2"
+          ],
+          [
+            null,
+            "SPEAKER_6"
+          ],
+          [
+            null,
+            "SPEAKER_7"
+          ],
+          [
+            null,
+            "SPEAKER_9"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "IB4001",
+      "engine": "candidate",
+      "reference_words": 4690,
+      "attributed_words": 3228,
+      "abstentions": {
+        "multiple_speakers": 1439,
+        "no_activity": 23
+      },
+      "excluded_xml_nodes": {
+        "A": {
+          "nonpositive_nonfinite_or_out_of_file": 309
+        },
+        "B": {
+          "nonpositive_nonfinite_or_out_of_file": 376
+        },
+        "C": {
+          "nonpositive_nonfinite_or_out_of_file": 122
+        },
+        "D": {
+          "nonpositive_nonfinite_or_out_of_file": 102
+        }
+      },
+      "cpwer": {
+        "error_rate": 0.3466950959488273,
+        "errors": 1626,
+        "length": 4690,
+        "insertions": 43,
+        "deletions": 1505,
+        "substitutions": 78,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0024833046177504814,
+          "overlap_time": 17.439999999999856,
+          "total_time": 7022.9
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0034958066322856455,
+          "overlap_time": 24.029999999999916,
+          "total_time": 6873.950000000001
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_00"
+          ],
+          [
+            "C",
+            "SPEAKER_01"
+          ],
+          [
+            "A",
+            "SPEAKER_03"
+          ],
+          [
+            "D",
+            "SPEAKER_02"
+          ]
+        ]
+      },
+      "tcpwer": {
+        "error_rate": 0.36375266524520256,
+        "errors": 1706,
+        "length": 4690,
+        "insertions": 107,
+        "deletions": 1569,
+        "substitutions": 30,
+        "reference_self_overlap": {
+          "overlap_rate": 0.0024833046177504814,
+          "overlap_time": 17.439999999999856,
+          "total_time": 7022.9
+        },
+        "hypothesis_self_overlap": {
+          "overlap_rate": 0.0034958066322856455,
+          "overlap_time": 24.029999999999916,
+          "total_time": 6873.950000000001
+        },
+        "missed_speaker": 0,
+        "falarm_speaker": 0,
+        "scored_speaker": 4,
+        "assignment": [
+          [
+            "B",
+            "SPEAKER_00"
+          ],
+          [
+            "C",
+            "SPEAKER_01"
+          ],
+          [
+            "A",
+            "SPEAKER_03"
+          ],
+          [
+            "D",
+            "SPEAKER_02"
+          ]
+        ]
+      }
+    }
+  ],
+  "aggregates": {
+    "baseline": {
+      "cpwer": {
+        "errors": 3461,
+        "length": 10286,
+        "error_rate": 0.3364767645343185
+      },
+      "tcpwer": {
+        "errors": 3626,
+        "length": 10286,
+        "error_rate": 0.35251798561151076
+      },
+      "abstained_words": 2857
+    },
+    "candidate": {
+      "cpwer": {
+        "errors": 2922,
+        "length": 10286,
+        "error_rate": 0.28407544234882365
+      },
+      "tcpwer": {
+        "errors": 3063,
+        "length": 10286,
+        "error_rate": 0.29778339490569705
+      },
+      "abstained_words": 2518
+    }
+  }
+}

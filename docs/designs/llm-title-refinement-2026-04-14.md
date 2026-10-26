@@ -118,3 +118,15 @@ Added/updated coverage in `crates/core/src/pipeline.rs` for:
 - algorithmic fallback still works standalone
 
 Existing `generate_title` tests remain in place to protect the pre-LLM fallback behavior.
+
+## 2026-10-25 update: title from the summary call
+
+The summary prompt now asks for a `TITLE:` line, so the summary call usually
+writes the title with the whole transcript in view. `maybe_refine_title_with_llm`
+uses that title when it passes the same sanitize and quality checks, logged as
+`title_generation` with `detail: "from-summary"` and no extra model call. The
+separate `refine_title` call still runs when the summary has no usable title:
+the model omitted it, it failed the quality gate, or the engine concatenated
+several chunk outputs without a synthesis call (no chunk names the whole
+meeting). Explicit and calendar titles still win first. Agent summaries of long
+meetings take the title from the final synthesis output, not from a chunk.

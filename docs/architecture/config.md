@@ -145,13 +145,14 @@ session cadence and confidence gates. See
 | key | default | meaning |
 |---|---|---|
 | `device` | unset | Explicit input device name; falls back to system default |
+| `desktop_audio_source` | unset | Desktop Meeting audio choice: `"microphone"` or `"microphone-and-system"`. Unset requires a first-use choice, unless an explicit call source already exists. Applies to desktop Meeting starts, including tray and shortcuts; CLI routing, memos, dictation and standalone Live remain independent. |
 | `silence_reminder_secs` | `300` | Seconds of silence before a reminder notification; 0 = off |
 | `silence_threshold` | `3` | RMS energy level (0–100) below which audio is silence |
 | `silence_auto_stop_secs` | `1800` | Seconds of silence before auto-stop; 0 = off |
 | `max_duration_secs` | `28800` | Hard recording cap (default 8h); 0 = off |
 | `min_disk_space_mb` | `500` | Auto-stop when free disk space drops below this; 0 = off |
 | `auto_call_intent` | `false` | Infer call intent from process detection (high false-positive rate) |
-| `allow_degraded_call_capture` | `false` | Allow call capture when selected input isn't a system-audio route |
+| `allow_degraded_call_capture` | `false` | CLI opt-in to call capture when selected input isn't a system-audio route. Desktop microphone + system audio always requires both sources and ignores this opt-in. |
 | `capture_backend` | `"cpal"` | `"cpal"` for loopback devices, `"core-audio-tap"` on macOS 14.4+, or opt-in `"pocketstation"` application capture on Windows and Linux |
 
 ### `[recording.sources]` — multi-source capture
@@ -164,6 +165,16 @@ session cadence and confidence gates. See
 When `capture_backend = "core-audio-tap"`, set `call = "auto"`. The backend
 captures the default macOS system output via Core Audio Process Tap instead of
 opening a named loopback input device.
+
+Both keys are required for CLI Process Tap capture: setting `capture_backend`
+alone does not add a second source. The backend requires macOS 14.4+ and its
+system-audio permission; see [Core Audio Process Tap](core-audio-process-tap.md).
+Desktop native call capture instead uses ScreenCaptureKit on macOS 15+ and
+requires Microphone and Screen Recording access. The desktop audio choice does
+not rewrite these CLI backend/source preferences. An explicitly configured
+in-process backend and call source, such as Process Tap with `call = "auto"`,
+remain in use instead of being replaced by the desktop helper. Choosing microphone only uses
+the selected microphone for that session without capturing the call source.
 
 When `capture_backend = "pocketstation"`, choose the application in `call`.
 Minutes then records that application and the selected microphone as separate
@@ -258,7 +269,7 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 
 | key | default | meaning |
 |---|---|---|
-| `backend` | `"whisper"` | Final transcription backend. Retained `"apple-speech"` and `"parakeet"` values resolve to sealed Whisper while their secure private-audio release gates remain closed. |
+| `backend` | `"auto"` | Final transcription backend. `"auto"` uses Parakeet v3 when it is installed (Apple Silicon, plugin and model) and the transcription language is one of its 25 European languages (on auto-detect, a Chinese interface keeps Whisper); otherwise Whisper. Existing configs that still held the old `"whisper"` default move to `"auto"` once (`auto_engine_migrated`). `"sherpa"` uses the in-process Parakeet v3 model (install with `minutes setup --sherpa`) for each utterance's final text while Whisper still streams partials; if Parakeet v3 is missing or fails, Whisper writes the text. Retained `"apple-speech"` and `"parakeet"` values resolve to sealed Whisper while their secure private-audio release gates remain closed. |
 | `destination` | `"insert"` | `"insert"` puts the final text in the active app and on the clipboard; `"clipboard"`, `"file"`, and `"command"` remain available for explicit delivery workflows |
 | `destination_file` | unset | Target file when `destination = "file"` |
 | `destination_command` | unset | Shell command when `destination = "command"` |
@@ -354,9 +365,11 @@ Call detection keeps one audio-check helper alive between polls and skips audio 
 
 | key | default | meaning |
 |---|---|---|
+| `backend` | empty, meaning inherit `transcription.engine` | Live transcript engine. `"apple-speech"` uses Apple's on-device SpeechAnalyzer for standalone Live mode only, and only in the signed Developer ID desktop app on macOS 26 or later; Settings greys it out elsewhere. If Apple Speech fails or its speech assets are missing, the session falls back to Parakeet or Whisper and logs `live_transcript_apple_fallback`. Live text during a normal recording (the sidecar) does not use it. See `docs/architecture/apple-speech.md`. |
 | `model` | empty, meaning `dictation.model` | Whisper model for live mode. An empty value uses `dictation.model`, **not** `transcription.model`: live transcription is real-time and wants a small fast model, while batch transcription can afford a slower, more accurate one. Set this explicitly to decouple them. |
 | `max_utterance_secs` | `30` | Force-finalize an utterance at this length |
 | `save_wav` | `true` | Save raw WAV so the stopped session can be preserved or processed |
+| `recording_sidecar` | `true` | Run the live transcript sidecar during normal and call recordings (microphone, dual-source and native call capture). The final transcript always comes from re-transcribing the saved WAV with `transcription.model`, so turning this off removes live text and avoids live-transcription inference during recording. Live-text readers (`minutes transcript --status`, `--include-current`, the desktop recording bar, Coach) report an explicit off state instead of waiting. Standalone Live mode is unaffected. |
 | `promote_on_stop` | `"process"` | `"process"` creates a normal meeting; `"preserve"` keeps a timestamped WAV/JSONL pair only; `"off"` leaves the overwrite-prone fixed slot unchanged |
 | `shortcut_enabled` | `false` | Global shortcut on |
 | `shortcut` | `"CmdOrCtrl+Shift+L"` | Chord |

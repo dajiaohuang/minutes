@@ -12,6 +12,11 @@ pub(crate) mod bounded_child;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_graph_xpc;
 pub mod orukeet;
+pub mod semantic;
+pub mod semantic_index;
+pub mod semantic_search;
+mod source_transcript;
+mod summary_semantics;
 
 /// Activate a previously validated MCP process-audio outer process group.
 /// The CLI must also hold the helper's live supervisor capability; the core
@@ -137,6 +142,8 @@ mod dictation_disfluency;
 pub mod dictation_experience;
 pub mod dictation_memory;
 pub(crate) mod engine_process;
+mod process_reaper;
+pub use process_reaper::spawn_reaped;
 /// Person entity-resolution clustering (issue #385, class 3): suggestion-only
 /// grouping of name-variant fragments. Never merges.
 pub(crate) mod entity_cluster;
@@ -156,6 +163,9 @@ pub mod interaction;
 pub mod jobs;
 pub mod knowledge;
 pub mod knowledge_extract;
+#[cfg(any(test, all(feature = "streaming", feature = "whisper")))]
+mod live_activity;
+mod live_input_progress;
 pub mod live_partials;
 pub mod live_session;
 pub mod live_sidekick;

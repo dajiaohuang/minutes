@@ -17,9 +17,38 @@ export function queryTokens(query: string): string[] {
   return searchTokens(query);
 }
 
+/** Function words treated as optional (mirrors Rust `SEARCH_STOPWORDS`). */
+export const SEARCH_STOPWORDS: ReadonlySet<string> = new Set([
+  "a", "an", "and", "are", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or",
+  "our", "the", "this", "that", "to", "was", "with", "my", "your",
+]);
+
+/**
+ * The query a person means (mirrors Rust `content_query`): stopwords dropped
+ * except the final token and except when nothing else would remain.
+ */
+export function contentQuery(query: string): string {
+  const tokens = queryTokens(query);
+  const last = tokens.length - 1;
+  const kept = tokens.filter((token, index) => index === last || !SEARCH_STOPWORDS.has(token));
+  return kept.every((token) => SEARCH_STOPWORDS.has(token)) ? tokens.join(" ") : kept.join(" ");
+}
+
+/** Fallbacks that each leave out one term (mirrors Rust `relaxed_queries`). */
+export function relaxedQueries(query: string): string[] {
+  const tokens = searchTokens(query);
+  if (tokens.length < 2 || tokens.length > 8) return [];
+  return tokens.map((_, skip) => tokens.filter((__, index) => index !== skip).join(" "));
+}
+
 export interface LexicalMatch {
   /** Local lexical relevance; not a probability or a cross-engine BM25 score. */
   score: number;
+  /**
+   * Relevance tier, compared before `score` (mirrors Rust `lexical_tier`):
+   * 3 phrase in title, 2 every term in title, 1 phrase in body, 0 scattered.
+   */
+  tier: number;
   contract: typeof RETRIEVAL_CONTRACT;
 }
 
@@ -44,14 +73,42 @@ export function lexicalMatch(title: string, body: string, query: string): Lexica
   const phrase = wanted.join(" ");
   if (titleTokens.join(" ").includes(phrase)) score += 4;
   if (bodyTokens.join(" ").includes(phrase)) score += 1;
-  return { score, contract: RETRIEVAL_CONTRACT };
+  return { score, tier: lexicalTier(titleTokens, bodyTokens, wanted), contract: RETRIEVAL_CONTRACT };
+}
+
+function containsPhrase(tokens: string[], wanted: string[]): boolean {
+  const last = wanted.length - 1;
+  for (let start = 0; start + wanted.length <= tokens.length; start += 1) {
+    if (wanted.every((term, index) => tierTokenMatches(tokens[start + index], term, index === last))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Token-wise phrase tiers; the final term matches as a prefix, like the match. */
+/** Ranking-only plural leniency (mirrors Rust `tier_token_matches`). */
+function tierTokenMatches(token: string, wanted: string, final: boolean): boolean {
+  if (matchesSearchToken(token, wanted, final)) return true;
+  const rest = token.startsWith(wanted) ? token.slice(wanted.length) : null;
+  return rest === "s" || rest === "es";
+}
+
+function lexicalTier(titleTokens: string[], bodyTokens: string[], wanted: string[]): number {
+  if (wanted.length === 0) return 0;
+  if (containsPhrase(titleTokens, wanted)) return 3;
+  const last = wanted.length - 1;
+  if (wanted.every((term, index) => titleTokens.some((token) => tierTokenMatches(token, term, index === last)))) {
+    return 2;
+  }
+  return containsPhrase(bodyTokens, wanted) ? 1 : 0;
 }
 
 export function compareSearchMatches(
-  left: { score: number; date: string; path: string },
-  right: { score: number; date: string; path: string }
+  left: { tier?: number; score: number; date: string; path: string },
+  right: { tier?: number; score: number; date: string; path: string }
 ): number {
   const date = (value: string) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
-  return right.score - left.score || date(right.date) - date(left.date) ||
+  return (right.tier ?? 0) - (left.tier ?? 0) || right.score - left.score || date(right.date) - date(left.date) ||
     (left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }

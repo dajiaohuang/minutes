@@ -320,12 +320,22 @@ fn is_closer(c: char) -> bool {
 /// match inside "gpts". Case folding is done per source character, so a length-changing
 /// lowercase (e.g. Turkish `İ`) elsewhere in the string does not disable matching.
 fn replace_word_ci(haystack: &str, surface: &str, replacement: &str) -> String {
+    replace_word_ci_counted(haystack, surface, replacement).0
+}
+
+/// [`replace_word_ci`], also returning how many occurrences were replaced.
+pub(crate) fn replace_word_ci_counted(
+    haystack: &str,
+    surface: &str,
+    replacement: &str,
+) -> (String, usize) {
     let needle: Vec<char> = surface.to_lowercase().chars().collect();
     if needle.is_empty() {
-        return haystack.to_string();
+        return (haystack.to_string(), 0);
     }
     let hay: Vec<char> = haystack.chars().collect();
     let mut out = String::with_capacity(haystack.len());
+    let mut replaced = 0;
     let mut i = 0;
     while i < hay.len() {
         if let Some(end) = match_word_at(&hay, i, &needle) {
@@ -333,6 +343,7 @@ fn replace_word_ci(haystack: &str, surface: &str, replacement: &str) -> String {
             let right_ok = end >= hay.len() || !is_word_char(hay[end]);
             if left_ok && right_ok {
                 out.push_str(replacement);
+                replaced += 1;
                 i = end;
                 continue;
             }
@@ -340,7 +351,7 @@ fn replace_word_ci(haystack: &str, surface: &str, replacement: &str) -> String {
         out.push(hay[i]);
         i += 1;
     }
-    out
+    (out, replaced)
 }
 
 /// If `needle` (already lowercased) matches `hay[start..]` under per-char lowercasing,
